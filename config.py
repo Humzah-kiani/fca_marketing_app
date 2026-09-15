@@ -23,7 +23,7 @@ def _setting(name, default=""):
 
 # --- Database -----------------------------------------------------------
 DATABASE_URL = _setting(
-    "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/fca_marketing"
+    "DATABASE_URL"
 )
 
 # --- AI provider selection --------------------------------------------------

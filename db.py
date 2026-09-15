@@ -14,6 +14,11 @@ _SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
 
 @contextmanager
 def get_conn():
+    if not DATABASE_URL or "localhost" in DATABASE_URL or "127.0.0.1" in DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL is missing or points to localhost. Add a hosted PostgreSQL "
+            "connection string under Streamlit Cloud > Manage app > Settings > Secrets."
+        )
     conn = psycopg2.connect(DATABASE_URL)
     try:
         yield conn

@@ -39,7 +39,11 @@ def _startup():
 
 
 
-_startup()
+try:
+    _startup()
+except RuntimeError as exc:
+    st.error(str(exc))
+    st.stop()
 
 st.title("FCA-Compliant Marketing Text Generator")
 st.caption(
