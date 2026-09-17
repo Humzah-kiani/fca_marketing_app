@@ -91,7 +91,7 @@ tab_generate, tab_history, tab_monitor, tab_flagged, tab_design = st.tabs(
 with tab_generate:
     st.subheader("Post details")
     format_type = st.selectbox("Format", ["Post", "Carousel"])
-    category = st.selectbox("Category", CATEGORIES)
+    category = st.selectbox("Category", CATEGORIES, key="generate_category")
     guideline = st.text_area(
         "Optional guideline",
         placeholder="e.g. tone, campaign name, specific product to mention, target platform...",
@@ -202,8 +202,8 @@ with tab_design:
         "Body copy",
         value=(selected_post if selected_post else "A structured approach can help you think through the options and build a realistic plan.")
     )
-    category = st.selectbox("Category", CATEGORIES, index=0)
-    accent = st.selectbox("Accent colour", ["gold", "navy", "green", "purple", "teal"])
+    category = st.selectbox("Category", CATEGORIES, index=0, key="design_category")
+    accent = st.selectbox("Accent colour", ["gold", "navy", "green", "purple", "teal"], key="design_accent")
     logo_text = st.text_input("Logo text", value="FCA Advisory")
     contact_text = st.text_input(
         "Contact details",
