@@ -2,6 +2,7 @@ import pytest
 
 import generator
 from generator import _build_system_prompt, _build_user_prompt, _dedupe_posts
+from post_designer import build_post_canvas
 
 
 def test_generate_posts_requires_live_ai_when_gemini_is_selected(monkeypatch):
@@ -49,3 +50,15 @@ def test_dedupe_posts_removes_duplicates():
         "Investment can be a long-term option.",
         "Understanding your risk profile matters.",
     ]
+
+
+def test_build_post_canvas_generates_square_design():
+    image = build_post_canvas(
+        headline="Retirement planning starts with clarity",
+        body="A structured approach can help you think through the options and build a realistic plan.",
+        category="Retirement",
+        accent="gold",
+    )
+
+    assert image.size == (1080, 1080)
+    assert image.mode == "RGB"
