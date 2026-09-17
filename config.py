@@ -33,9 +33,9 @@ AI_PROVIDER = _setting("AI_PROVIDER", "gemini").lower()
 # --- Google Gemini API ----------------------------------------------------
 GEMINI_API_KEY = _setting("GEMINI_API_KEY")
 
-# Free-tier Gemini model name. Update GEMINI_MODEL in your .env if you prefer
-# a different Gemini model that is available to your account.
-GEMINI_MODEL = _setting("GEMINI_MODEL", "gemini-2.5-flash")
+# Use a currently supported Gemini model. newer accounts no longer accept the
+# retired gemini-2.5-flash model name.
+GEMINI_MODEL = _setting("GEMINI_MODEL", "gemini-3.6-flash")
 
 # --- Local Ollama API ------------------------------------------------------
 # Use a lightweight local LLM for more stable downloads and lower RAM usage.
