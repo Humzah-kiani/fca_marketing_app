@@ -2,18 +2,21 @@ import json
 
 import streamlit as st
 
+from config import AI_PROVIDER, GEMINI_MODEL, OLLAMA_MODEL
 from db import init_db, fetch_all, execute
 from compliance_validator import validate_posts
-from fca_reference import refresh_fca_references
 from fca_monitor import (
     FCA_SECTIONS,
     ensure_sections_seeded,
     get_current_snapshot,
+    get_sections_reference_text,
     check_for_updates,
 )
 from generator import generate_posts
 
 st.set_page_config(page_title="FCA Compliant Marketing Generator", layout="wide")
+
+active_model = OLLAMA_MODEL if AI_PROVIDER == "ollama" else GEMINI_MODEL
 
 
 def _coerce_json_list(value):
@@ -58,6 +61,13 @@ st.info(
     icon="⚠️",
 )
 
+with st.sidebar:
+    st.subheader("AI configuration")
+    st.caption(f"Provider: {AI_PROVIDER.title()}")
+    st.caption(f"Model: `{active_model}`")
+    if AI_PROVIDER == "ollama":
+        st.caption("Using the local Ollama service at http://localhost:11434")
+
 CATEGORIES = [
     "Retirement",
     "Investment",
@@ -87,9 +97,9 @@ with tab_generate:
     )
 
     if st.button("Generate", type="primary"):
-        with st.spinner("Grounding prompt in current FCA reference material and generating text..."):
+        with st.spinner("Generating compliant text..."):
             try:
-                refresh_fca_references()
+                ensure_sections_seeded()
                 snapshot = get_current_snapshot()
                 posts = generate_posts(format_type, category, guideline, int(num_posts))
                 validation_results = validate_posts(posts, format_type, category)

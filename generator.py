@@ -3,6 +3,7 @@ Generates FCA-aware marketing copy using the Google Gemini API, grounded in the
 currently cached FCA Handbook/guidance text (see fca_monitor.py).
 """
 import json
+import uuid
 
 import requests
 
@@ -33,56 +34,89 @@ CATEGORY_NOTES = {
     "Lifestyle": "Keep aspirational language honest — do not tie specific lifestyle outcomes to a financial product's performance.",
 }
 
-SYSTEM_PROMPT_TEMPLATE = """You are a UK financial promotions compliance copywriter working for a \
-UK-regulated Financial Adviser firm. You write {format_type} content for social media.
+SYSTEM_PROMPT_TEMPLATE = """You are a UK financial promotions compliance copywriter writing {format_type} content for the "{category}" category.
 
-You must follow the FCA Handbook and related guidance, in particular:
-- COBS 4 (Communicating with clients, including financial promotions): promotions must be \
-clear, fair, not misleading, and appropriate for the target audience.
-- PRIN (Principles for Businesses): due regard to the information needs of clients; \
-communications must be clear, fair and not misleading.
-- COBS 2.1: act honestly, fairly and professionally in accordance with the best interests of \
-the client.
-- FG15/4 (Social Media and Customer Communications) and FG22/5 (Consumer Duty): communications \
-must support consumer understanding, remain balanced (risk stated alongside benefit), and must \
-not be a disguised/unbalanced financial promotion.
+Use the FCA guidance and category note carefully. The goal is to create compliant, publishable content that is clearly tailored to {category}.
 
-Hard rules — never break these:
-- Never promise, guarantee, or strongly imply a specific financial outcome or return.
-- Always balance any stated benefit with an appropriate, category-relevant risk warning.
-- No high-pressure or false-urgency tactics ("act now or miss out", countdown language, etc.).
-- Do not give personalised financial advice in the text itself — invite the reader to seek \
-regulated advice tailored to their circumstances.
-- Use plain English; avoid unexplained jargon.
-- Never imply FCA endorsement of the firm or its products.
+Core rules:
+- The target category is exactly: {category}.
+- Write content that is unmistakably tailored to {category}; use category-specific examples, risks, benefits and wording.
+- Do not reuse generic wording across categories or repeat the same hook, wording, or structure for every try.
+- Do not produce the same message twice; vary the angle, examples and emphasis while staying compliant.
+- Each item in the final JSON array must be distinct from the others and specifically written for {category}.
+- Never promise or imply guaranteed returns, outcomes, or benefits.
+- Always balance any stated benefit with a relevant risk statement.
+- No urgent sales pressure or false urgency.
+- Do not give personal advice; invite the reader to speak to a regulated adviser if appropriate.
 - Category-specific note: {category_note}
 
-Reference material — current cached extracts from the FCA Handbook/guidance pages being \
-tracked by this app (may be partial; treat as the latest known wording):
+Reference material (use only the most relevant extracts):
 {reference_text}
 
-Additional adviser guideline for this batch (may be empty): {guideline}
+Additional adviser guideline: {guideline}
 
-Output requirements:
-- Write content that is ready to publish as a real social media asset.
-- Respond ONLY with a JSON array of exactly {num_posts} string(s).
-- Each string must be one complete, final {format_type} asset for the "{category}" category.
-- Do not add headings or commentary outside the JSON array.
-
-For a Post asset:
-- Write a polished social post with a clear hook, short body copy, clear benefit/risk balance, and a compliant closing CTA.
-- Keep it natural for social media, ideally 80-150 words, written as one finished post.
-- Include a plain-English explanation of the product/issue, a relevant risk statement, and a soft CTA such as: "If you'd like to discuss your circumstances, we can talk through the options."
-- Avoid any claim that the reader must act immediately or that a result is guaranteed.
-
-For a Carousel asset:
-- Write a full carousel deck as a single string with numbered slides, e.g. 'Slide 1: ...\nSlide 2: ...\nSlide 3: ...'
-- Use 4-6 slides with a clear topic, informative body copy, and a final slide that gives the relevant risk statement and a compliant CTA.
-- Keep each slide concise and readable, with no sales pressure or urgent wording.
-- Each slide should read like a real social carousel, not a paragraph dumped into slide labels.
-
-No markdown fences, no preamble, no extra notes outside the JSON array.
+Output format:
+- Return only a JSON array of exactly {num_posts} strings.
+- No markdown, no headings, no commentary outside the JSON array.
+- Each string must be a complete final {format_type} asset for the "{category}" category.
+- Make each asset different in wording and structure, not copy-pasted variations of the same text.
 """
+
+
+def _build_system_prompt(format_type: str, category: str, category_note: str, reference_text: str, guideline: str, num_posts: int) -> str:
+    """Build a shorter prompt that is still category-specific but avoids slow, bloated inputs."""
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        format_type=format_type,
+        category=category,
+        category_note=category_note,
+        reference_text=(reference_text or "(No additional FCA text available)")[:2000],
+        guideline=(guideline or "(none provided)")[:500],
+        num_posts=num_posts,
+    )
+
+
+def _build_user_prompt(
+    format_type: str,
+    category: str,
+    num_posts: int,
+    variation_token: str | None = None,
+    angle_seed: int | None = None,
+) -> str:
+    """Add a generation-specific seed so every retry uses a fresh angle instead of the same content."""
+    variation_token = variation_token or uuid.uuid4().hex[:8]
+    angle_seed = angle_seed if angle_seed is not None else int(variation_token[:2], 16)
+    angle_options = [
+        "practical decision-making",
+        "risk-aware education",
+        "common misconceptions",
+        "personal circumstances and suitability",
+        "benefits balanced with realistic risk",
+    ]
+    angles = [
+        angle_options[(angle_seed + offset) % len(angle_options)]
+        for offset in range(min(num_posts, 5))
+    ]
+    serialised_angles = "; ".join(f"{i + 1}) {angle}" for i, angle in enumerate(angles))
+    return (
+        f"Create {num_posts} distinct {format_type.lower()} assets for the '{category}' category. "
+        f"This is generation attempt {variation_token}. Use these different angles: {serialised_angles}. "
+        f"Each output must be clearly tailored to {category}, not a generic template, and must not repeat the same hook, wording, structure, or examples as earlier attempts."
+    )
+
+
+def _dedupe_posts(posts: list[str]) -> list[str]:
+    """Remove repeated text while preserving the first unique instance for each item."""
+    unique_posts: list[str] = []
+    seen: set[str] = set()
+    for post in posts:
+        if not isinstance(post, str):
+            continue
+        key = " ".join(post.lower().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_posts.append(post)
+    return unique_posts
 
 
 def _format_fallback_post(category: str, guideline: str, index: int) -> str:
@@ -191,7 +225,7 @@ def _call_ollama(prompt: str) -> str:
             "model": model_name,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 0.4},
+            "options": {"temperature": 1.1, "top_p": 0.95},
         },
         timeout=180,
     )
@@ -209,15 +243,24 @@ def _generate_with_ollama(format_type: str, category: str, guideline: str, num_p
         )
 
     category_note = CATEGORY_NOTES.get(category, "")
-    prompt = SYSTEM_PROMPT_TEMPLATE.format(
+    prompt = _build_system_prompt(
         format_type=format_type,
         category=category,
         category_note=category_note,
-        reference_text=reference_text[:12000],
-        guideline=guideline or "(none provided)",
+        reference_text=reference_text,
+        guideline=guideline,
         num_posts=num_posts,
     )
-    raw = _call_ollama(prompt)
+    variation_token = uuid.uuid4().hex[:8]
+    raw = _call_ollama(
+        prompt + "\n\n" + _build_user_prompt(
+            format_type,
+            category,
+            num_posts,
+            variation_token=variation_token,
+            angle_seed=int(variation_token[:2], 16),
+        )
+    )
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`")
@@ -230,6 +273,7 @@ def _generate_with_ollama(format_type: str, category: str, guideline: str, num_p
             raise ValueError("Response was not a non-empty JSON array")
     except Exception:
         posts = [cleaned or raw]
+    posts = _dedupe_posts(posts)
     return posts[: max(num_posts, 1)]
 
 
@@ -246,25 +290,30 @@ def _generate_with_gemini(format_type: str, category: str, guideline: str, num_p
         )
 
     category_note = CATEGORY_NOTES.get(category, "")
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+    system_prompt = _build_system_prompt(
         format_type=format_type,
         category=category,
         category_note=category_note,
-        reference_text=reference_text[:12000],
-        guideline=guideline or "(none provided)",
+        reference_text=reference_text,
+        guideline=guideline,
         num_posts=num_posts,
     )
 
+    variation_token = uuid.uuid4().hex[:8]
     response = client.models.generate_content(
         model=GEMINI_MODEL,
-        contents=(
-            f"Generate {num_posts} compliant {format_type} text(s) for the "
-            f"'{category}' category now."
+        contents=_build_user_prompt(
+            format_type,
+            category,
+            num_posts,
+            variation_token=variation_token,
+            angle_seed=int(variation_token[:2], 16),
         ),
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
-            max_output_tokens=3000,
-            temperature=0.4,
+            max_output_tokens=1400,
+            temperature=0.9,
+            top_p=0.9,
         ),
     )
 
@@ -294,18 +343,50 @@ def _generate_with_gemini(format_type: str, category: str, guideline: str, num_p
     except Exception:
         posts = [raw]
 
+    posts = _dedupe_posts(posts)
     return posts[: max(num_posts, 1)]
 
 
-def generate_posts(format_type: str, category: str, guideline: str, num_posts: int) -> list:
-    try:
-        if AI_PROVIDER == "gemini" and GEMINI_API_KEY:
-            return _generate_with_gemini(format_type, category, guideline, num_posts)
-        if AI_PROVIDER == "ollama":
-            return _generate_with_ollama(format_type, category, guideline, num_posts)
-        if GEMINI_API_KEY:
-            return _generate_with_gemini(format_type, category, guideline, num_posts)
-    except Exception:
-        pass
+def _retry_unique_posts(generator_func, format_type: str, category: str, guideline: str, num_posts: int, max_attempts: int = 2):
+    """Keep retrying only briefly with fresh angles, to reduce latency while still enforcing uniqueness."""
+    collected: list[str] = []
+    seen: set[str] = set()
+    for attempt in range(max_attempts):
+        candidate_posts = generator_func(format_type, category, guideline, num_posts)
+        for post in candidate_posts:
+            if not isinstance(post, str):
+                continue
+            key = " ".join(post.lower().split())
+            if key in seen:
+                continue
+            seen.add(key)
+            collected.append(post)
+        if len(collected) >= max(num_posts, 1):
+            return collected[: max(num_posts, 1)]
+    return collected[: max(num_posts, 1)]
 
-    return _fallback_posts(format_type, category, guideline, num_posts)
+
+def generate_posts(format_type: str, category: str, guideline: str, num_posts: int) -> list:
+    target_count = max(num_posts, 1)
+
+    if AI_PROVIDER == "gemini":
+        if not GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY is missing. Add it in Streamlit Cloud > Settings > Secrets.")
+        try:
+            return _retry_unique_posts(_generate_with_gemini, format_type, category, guideline, target_count)
+        except Exception as exc:
+            raise RuntimeError(f"Gemini generation failed: {exc}") from exc
+
+    if AI_PROVIDER == "ollama":
+        try:
+            return _retry_unique_posts(_generate_with_ollama, format_type, category, guideline, target_count)
+        except Exception as exc:
+            raise RuntimeError(f"Ollama generation failed: {exc}") from exc
+
+    if GEMINI_API_KEY:
+        try:
+            return _retry_unique_posts(_generate_with_gemini, format_type, category, guideline, target_count)
+        except Exception as exc:
+            raise RuntimeError(f"Gemini generation failed: {exc}") from exc
+
+    raise RuntimeError("No AI provider is configured. Add GEMINI_API_KEY or set AI_PROVIDER to ollama.")
