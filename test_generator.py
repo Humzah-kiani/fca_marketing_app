@@ -52,6 +52,21 @@ def test_dedupe_posts_removes_duplicates():
     ]
 
 
+def test_build_system_prompt_uses_premium_social_style():
+    prompt = _build_system_prompt(
+        format_type="Post",
+        category="Retirement",
+        category_note="Risk statement",
+        reference_text="FCA guidance placeholder",
+        guideline="Campaign launch",
+        num_posts=3,
+    )
+
+    assert "premium" in prompt.lower()
+    assert "strong hook" in prompt.lower()
+    assert "modern financial adviser social brand" in prompt.lower()
+
+
 def test_build_post_canvas_generates_square_design():
     image = build_post_canvas(
         headline="Retirement planning starts with clarity",
