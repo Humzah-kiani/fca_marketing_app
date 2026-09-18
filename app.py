@@ -16,7 +16,7 @@ from fca_monitor import (
     check_for_updates,
 )
 from generator import generate_posts
-from post_designer import build_post_canvas
+from post_studio import build_post_canvas, post_studio_ui
 
 st.set_page_config(page_title="FCA Compliant Marketing Generator", layout="wide")
 
@@ -174,70 +174,7 @@ with tab_generate:
 
 # -------------------------------------------------------------- Design Post
 with tab_design:
-    st.subheader("Design Post")
-    st.caption("Simple template-based post composer matched to the reference sample set.")
-
-    history_rows = fetch_all(
-        """SELECT gb.category, gp.post_text
-           FROM generation_batches gb
-           JOIN generated_posts gp ON gp.batch_id = gb.id
-           ORDER BY gb.created_at DESC, gp.post_index ASC LIMIT 20"""
-    )
-
-    history_options = ["Custom draft"]
-    history_map = {}
-    for row in history_rows:
-        option_label = f"{row['category']} — {row['post_text'][:60]}"
-        history_options.append(option_label)
-        history_map[option_label] = row["post_text"]
-
-    selected_option = st.selectbox("Use a generated post", history_options)
-    selected_post = history_map.get(selected_option, "")
-
-    headline = st.text_input(
-        "Headline",
-        value="Retirement planning starts with clarity" if not selected_post else selected_post.split("\n")[0][:80],
-    )
-    body = st.text_area(
-        "Body copy",
-        value=(selected_post if selected_post else "A structured approach can help you think through the options and build a realistic plan.")
-    )
-    category = st.selectbox("Category", CATEGORIES, index=0, key="design_category")
-    accent = st.selectbox("Accent colour", ["gold", "navy", "green", "purple", "teal"], key="design_accent")
-    logo_text = st.text_input("Logo text", value="FCA Advisory")
-    contact_text = st.text_input(
-        "Contact details",
-        value="hello@adviser.co.uk • 020 0000 0000 • adviser.co.uk",
-    )
-    uploaded_bg = st.file_uploader("Background image (optional)", type=["png", "jpg", "jpeg", "webp"])
-
-    if st.button("Render Post Design", type="primary"):
-        temp_path = None
-        if uploaded_bg is not None:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_bg.name.split('.')[-1].lower()}") as temp_file:
-                temp_file.write(uploaded_bg.getvalue())
-                temp_path = temp_file.name
-
-        image = build_post_canvas(
-            headline=headline,
-            body=body,
-            category=category,
-            accent=accent,
-            logo_text=logo_text,
-            contact_text=contact_text,
-            background_path=temp_path,
-        )
-
-        buffer = BytesIO()
-        image.save(buffer, format="PNG")
-        st.image(buffer.getvalue(), caption="Post preview")
-
-        if temp_path:
-            import os
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+    post_studio_ui()
 
 # ----------------------------------------------------------------- History
 with tab_history:
