@@ -53,11 +53,11 @@ def build_post_canvas(
     contact_text: str = "hello@adviser.co.uk • 020 0000 0000 • adviser.co.uk",
     background_path: str | None = None,
 ) -> Image.Image:
-    """Render a square social-media post mockup in a finance-style template."""
+    """Render a premium square social-media post mockup matching adviser-style sample references."""
     width, height = 1080, 1080
     accent_rgb = ACCENT_COLORS.get(accent.lower(), ACCENT_COLORS["gold"])
 
-    base = Image.new("RGB", (width, height), color=(12, 26, 39))
+    base = Image.new("RGB", (width, height), color=(11, 21, 32))
     draw = ImageDraw.Draw(base)
 
     if background_path:
@@ -69,59 +69,83 @@ def build_post_canvas(
         except Exception:
             pass
 
-    overlay = Image.new("RGBA", (width, height), (10, 16, 24, 180))
+    overlay = Image.new("RGBA", (width, height), (10, 16, 24, 185))
     base = Image.alpha_composite(base.convert("RGBA"), overlay).convert("RGB")
     draw = ImageDraw.Draw(base)
 
-    # Brand accent strip
+    # soft premium accent panels
     accent_bar = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     accent_draw = ImageDraw.Draw(accent_bar)
-    accent_draw.rounded_rectangle((60, 60, 1020, 170), radius=22, fill=(*accent_rgb, 220))
+    accent_draw.rounded_rectangle((50, 60, 1030, 150), radius=26, fill=(*accent_rgb, 230))
+    accent_draw.rounded_rectangle((610, 180, 980, 930), radius=38, fill=(255, 255, 255, 20))
     base = Image.alpha_composite(base.convert("RGBA"), accent_bar).convert("RGB")
     draw = ImageDraw.Draw(base)
 
-    # Content panel
-    panel = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    panel_draw = ImageDraw.Draw(panel)
-    panel_draw.rounded_rectangle((80, 200, 980, 930), radius=36, fill=(17, 25, 35, 150))
-    base = Image.alpha_composite(base.convert("RGBA"), panel).convert("RGB")
+    # left-side text card
+    left_panel = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    left_draw = ImageDraw.Draw(left_panel)
+    left_draw.rounded_rectangle((85, 190, 565, 845), radius=34, fill=(15, 23, 34, 150))
+    base = Image.alpha_composite(base.convert("RGBA"), left_panel).convert("RGB")
     draw = ImageDraw.Draw(base)
 
-    # Category badge
-    badge_font = _load_font(28, bold=True)
-    badge_box = draw.textbbox((0, 0), category.upper(), font=badge_font)
-    badge_x0 = 150
-    badge_y0 = 245
-    badge_x1 = badge_x0 + badge_box[2] + 36
-    badge_y1 = badge_y0 + badge_box[3] + 28
-    draw.rounded_rectangle((badge_x0, badge_y0, badge_x1, badge_y1), radius=18, fill=(*accent_rgb, 255))
-    draw.text((badge_x0 + 18, badge_y0 + 12), category.upper(), fill=(14, 20, 28), font=badge_font)
+    # top left logo block
+    logo_font = _load_font(26, bold=True)
+    logo_box = draw.textbbox((0, 0), logo_text.upper(), font=logo_font)
+    draw.rounded_rectangle((110, 90, 110 + logo_box[2] + 26, 90 + logo_box[3] + 20), radius=12, fill=(255, 255, 255, 36))
+    draw.text((126, 100), logo_text.upper(), fill=(*accent_rgb, 255), font=logo_font)
 
-    # Headline
-    headline_font = _load_font(72, bold=True)
-    headline_lines = _wrap_text(draw, headline, 620, headline_font)
-    headline_y = 340
+    # category badge
+    badge_font = _load_font(26, bold=True)
+    badge_text = category.upper()
+    badge_box = draw.textbbox((0, 0), badge_text, font=badge_font)
+    badge_x0 = 120
+    badge_y0 = 240
+    badge_x1 = badge_x0 + badge_box[2] + 32
+    badge_y1 = badge_y0 + badge_box[3] + 18
+    draw.rounded_rectangle((badge_x0, badge_y0, badge_x1, badge_y1), radius=16, fill=(*accent_rgb, 255))
+    draw.text((badge_x0 + 16, badge_y0 + 8), badge_text, fill=(13, 20, 31), font=badge_font)
+
+    # headline
+    headline_font = _load_font(74, bold=True)
+    headline_lines = _wrap_text(draw, headline, 430, headline_font)
+    headline_y = 315
     for line in headline_lines[:3]:
-        line_box = draw.textbbox((0, 0), line, font=headline_font)
-        draw.text((150, headline_y), line, fill=(255, 255, 255), font=headline_font)
-        headline_y += line_box[3] + 12
+        draw.text((120, headline_y), line, fill=(255, 255, 255), font=headline_font)
+        headline_y += 76
 
-    # Body text
-    body_font = _load_font(34, bold=False)
-    body_lines = _wrap_text(draw, body, 630, body_font)
-    body_y = headline_y + 12
+    # body copy
+    body_font = _load_font(30, bold=False)
+    body_lines = _wrap_text(draw, body, 430, body_font)
+    body_y = headline_y + 10
     for line in body_lines[:5]:
-        draw.text((150, body_y), line, fill=(226, 232, 238), font=body_font)
+        draw.text((120, body_y), line, fill=(225, 231, 239), font=body_font)
         body_y += 42
 
-    # Bottom contact bar
-    draw.rounded_rectangle((150, 815, 930, 890), radius=18, fill=(255, 255, 255, 40))
-    logo_font = _load_font(26, bold=True)
-    draw.text((170, 840), logo_text.upper(), fill=(*accent_rgb, 255), font=logo_font)
-    contact_font = _load_font(22, bold=False)
-    draw.text((550, 842), contact_text, fill=(240, 242, 245), font=contact_font)
+    # CTA pill
+    cta_font = _load_font(24, bold=True)
+    cta_text = "Book a consultation"
+    cta_box = draw.textbbox((0, 0), cta_text, font=cta_font)
+    cta_x0 = 120
+    cta_y0 = 770
+    cta_x1 = cta_x0 + cta_box[2] + 42
+    cta_y1 = cta_y0 + cta_box[3] + 18
+    draw.rounded_rectangle((cta_x0, cta_y0, cta_x1, cta_y1), radius=20, fill=(*accent_rgb, 255))
+    draw.text((cta_x0 + 21, cta_y0 + 9), cta_text, fill=(15, 22, 29), font=cta_font)
 
-    # Simple decorative circle accent
-    draw.ellipse((825, 230, 980, 385), fill=(*accent_rgb, 170))
+    # bottom contact bar
+    draw.rounded_rectangle((120, 815, 980, 900), radius=18, fill=(255, 255, 255, 32))
+    footer_font = _load_font(20, bold=False)
+    draw.text((145, 840), contact_text, fill=(240, 242, 245), font=footer_font)
+
+    # decorative image-style shape on the right
+    shape = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    shape_draw = ImageDraw.Draw(shape)
+    shape_draw.ellipse((650, 220, 930, 500), fill=(*accent_rgb, 160))
+    shape_draw.rounded_rectangle((640, 520, 920, 760), radius=36, fill=(20, 38, 50, 160))
+    base = Image.alpha_composite(base.convert("RGBA"), shape).convert("RGB")
+    draw = ImageDraw.Draw(base)
+
+    # diagonal accent line
+    draw.line((700, 220, 930, 760), fill=(*accent_rgb, 200), width=8)
 
     return base
