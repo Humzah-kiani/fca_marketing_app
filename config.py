@@ -3,7 +3,12 @@ Central configuration, loaded from environment variables (or a local .env file).
 Copy .env.example to .env and fill in real values before running the app.
 """
 import os
-from dotenv import load_dotenv
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - installed in deployment environments
+    def load_dotenv():
+        return False
 
 load_dotenv()
 

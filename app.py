@@ -16,7 +16,7 @@ from fca_monitor import (
     check_for_updates,
 )
 from generator import generate_posts
-from post_studio import build_post_canvas, post_studio_ui
+from post_generation import build_post_canvas, post_studio_ui
 
 st.set_page_config(page_title="FCA Compliant Marketing Generator", layout="wide")
 

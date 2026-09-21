@@ -3,7 +3,7 @@ import pytest
 import generator
 import post_generation
 from generator import _build_system_prompt, _build_user_prompt, _dedupe_posts
-from post_studio import build_post_canvas
+from post_generation import build_post_canvas
 
 
 def test_generate_posts_requires_live_ai_when_gemini_is_selected(monkeypatch):
