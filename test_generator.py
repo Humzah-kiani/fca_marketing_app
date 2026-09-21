@@ -1,8 +1,9 @@
 import pytest
 
 import generator
+import post_generation
 from generator import _build_system_prompt, _build_user_prompt, _dedupe_posts
-from post_designer import build_post_canvas
+from post_studio import build_post_canvas
 
 
 def test_generate_posts_requires_live_ai_when_gemini_is_selected(monkeypatch):
@@ -65,6 +66,11 @@ def test_build_system_prompt_uses_premium_social_style():
     assert "premium" in prompt.lower()
     assert "strong hook" in prompt.lower()
     assert "modern financial adviser social brand" in prompt.lower()
+
+
+def test_post_generation_module_reexports_post_studio_api():
+    assert post_generation.build_post_canvas is build_post_canvas
+    assert post_generation.post_studio_ui is not None
 
 
 def test_build_post_canvas_generates_square_design():

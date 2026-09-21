@@ -1,0 +1,1 @@
+._balloons_c951s_1 ._balloon_c951s_1{z-index:1000000;opacity:1;width:121px;height:300px;margin-left:-60.5px;animation-name:_move-up_c951s_1;animation-duration:.75s;animation-timing-function:ease-in;animation-iteration-count:1;animation-direction:normal;position:fixed;top:-300px}@keyframes _move-up_c951s_1{0%{transform:translateY(calc(100vh + 300px))}to{transform:translateY(0)}}

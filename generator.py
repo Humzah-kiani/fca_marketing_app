@@ -44,6 +44,7 @@ Core rules:
 - Use a premium, professional tone: clean, confident, helpful, and easy to read.
 - Open with a strong hook or smart question, then explain the value, decision or risk clearly.
 - Keep language natural and human. Avoid dry legal phrasing, overused slogans, repeated hooks, and generic filler.
+- Do not repeat the same hook, wording, structure, or examples across the final set.
 - Each item in the final JSON array must be substantially different from the others in angle, emphasis and wording.
 - Do not produce repetitive content across attempts or across items in the same batch.
 - Never promise or imply guaranteed returns, outcomes, or benefits.
