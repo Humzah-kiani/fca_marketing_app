@@ -5,6 +5,8 @@ from io import BytesIO
 import streamlit as st
 from PIL import Image
 
+from post_studio import build_post_canvas, post_studio_ui
+
 from config import AI_PROVIDER, GEMINI_MODEL, OLLAMA_MODEL
 from db import init_db, fetch_all, execute
 from compliance_validator import validate_posts
@@ -16,7 +18,6 @@ from fca_monitor import (
     check_for_updates,
 )
 from generator import generate_posts
-from post_generation import build_post_canvas, post_studio_ui
 
 st.set_page_config(page_title="FCA Compliant Marketing Generator", layout="wide")
 
