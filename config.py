@@ -39,36 +39,18 @@ AI_PROVIDER = _setting("AI_PROVIDER", "gemini").lower()
 GEMINI_API_KEY = _setting("GEMINI_API_KEY")
 
 def _normalise_gemini_model(model_name: str) -> str:
-    """Map retired or audio-only preview model names to a stable text-capable fallback."""
+    """Keep the app aligned with the exact Gemini model you want to use."""
     raw = (model_name or "").strip()
     if not raw:
-        return "gemini-2.0-flash"
+        return "gemini-3.6-flash"
     if raw.startswith("models/"):
         raw = raw.replace("models/", "", 1)
-    retired = {"gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"}
-    audio_only_preview = {
-        "gemini-2.5-flash-preview-tts",
-        "gemini-2.5-flash-live-tts",
-        "gemini-2.5-pro-preview-tts",
-    }
-    if raw in retired or raw.startswith("gemini-2.5-"):
-        return "gemini-2.0-flash"
-    if raw in audio_only_preview or "preview-tts" in raw:
-        return "gemini-2.0-flash"
     return raw
 
 
-# Prefer a stable text-capable model that is less likely to hit transient
-# availability or unsupported-preview issues. Keep a couple of safe fallbacks.
-GEMINI_MODEL = _normalise_gemini_model(_setting("GEMINI_MODEL", "gemini-1.5-flash"))
-GEMINI_FALLBACK_MODELS = [
-    _normalise_gemini_model(model.strip())
-    for model in _setting(
-        "GEMINI_FALLBACK_MODELS",
-        "gemini-2.0-flash,gemini-2.0-flash-lite",
-    ).split(",")
-    if model.strip() and "preview-tts" not in model.lower()
-]
+# Exact model requested by the user. No fallback list is used here.
+GEMINI_MODEL = _normalise_gemini_model(_setting("GEMINI_MODEL", "gemini-3.6-flash"))
+GEMINI_FALLBACK_MODELS = []
 
 # --- Local Ollama API ------------------------------------------------------
 # Use a lightweight local LLM for more stable downloads and lower RAM usage.
