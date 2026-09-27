@@ -4,7 +4,12 @@ import pytest
 
 import generator
 import post_studio
-from generator import _build_system_prompt, _build_user_prompt, _dedupe_posts
+from generator import (
+    _build_system_prompt,
+    _build_user_prompt,
+    _dedupe_posts,
+    _generate_with_gemini,
+)
 from post_studio import build_post_canvas
 
 
@@ -53,6 +58,33 @@ def test_dedupe_posts_removes_duplicates():
         "Investment can be a long-term option.",
         "Understanding your risk profile matters.",
     ]
+
+
+def test_generate_with_gemini_tries_fallback_model_on_503(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        class models:
+            @staticmethod
+            def generate_content(model, *args, **kwargs):
+                calls.append(model)
+                if model == "gemini-3.6-flash":
+                    raise RuntimeError("503 UNAVAILABLE")
+                return type("Response", (), {"text": '["Fallback post"]'})()
+
+    monkeypatch.setattr(generator, "GEMINI_MODEL", "gemini-3.6-flash")
+    monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["gemini-2.5-flash"])
+    monkeypatch.setattr(generator, "genai", type("FakeGenAI", (), {"Client": FakeClient}))
+    monkeypatch.setattr(generator, "types", type("FakeTypes", (), {"GenerateContentConfig": lambda **kwargs: kwargs}))
+    monkeypatch.setattr(generator, "get_sections_reference_text", lambda: "Reference text")
+
+    result = _generate_with_gemini("Post", "Retirement", "Campaign", 1)
+
+    assert result == ["Fallback post"]
+    assert calls == ["gemini-3.6-flash", "gemini-2.5-flash"]
 
 
 def test_build_system_prompt_uses_premium_social_style():

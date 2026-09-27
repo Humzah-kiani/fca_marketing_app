@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover - optional cloud dependency
 from config import (
     AI_PROVIDER,
     GEMINI_API_KEY,
+    GEMINI_FALLBACK_MODELS,
     GEMINI_MODEL,
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
@@ -287,6 +288,35 @@ def _generate_with_ollama(format_type: str, category: str, guideline: str, num_p
     return posts[: max(num_posts, 1)]
 
 
+def _gemini_model_candidates() -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for model_name in [GEMINI_MODEL] + list(GEMINI_FALLBACK_MODELS):
+        model_name = (model_name or "").strip()
+        if not model_name or model_name in seen:
+            continue
+        seen.add(model_name)
+        candidates.append(model_name)
+    return candidates
+
+
+def _is_transient_gemini_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        token in message
+        for token in [
+            "503",
+            "503 unavailable",
+            "unavailable",
+            "rate limit",
+            "429",
+            "resource exhausted",
+            "overloaded",
+            "temporarily unavailable",
+        ]
+    )
+
+
 def _generate_with_gemini(format_type: str, category: str, guideline: str, num_posts: int) -> list:
     if genai is None or types is None:
         raise RuntimeError("Google GenAI SDK is not installed.")
@@ -309,52 +339,64 @@ def _generate_with_gemini(format_type: str, category: str, guideline: str, num_p
         num_posts=num_posts,
     )
 
-    variation_token = uuid.uuid4().hex[:8]
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=_build_user_prompt(
-            format_type,
-            category,
-            num_posts,
-            variation_token=variation_token,
-            angle_seed=int(variation_token[:2], 16),
-        ),
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            max_output_tokens=1400,
-            temperature=0.9,
-            top_p=0.9,
-        ),
-    )
+    last_error: Exception | None = None
+    for model_name in _gemini_model_candidates():
+        try:
+            variation_token = uuid.uuid4().hex[:8]
+            response = client.models.generate_content(
+                model=model_name,
+                contents=_build_user_prompt(
+                    format_type,
+                    category,
+                    num_posts,
+                    variation_token=variation_token,
+                    angle_seed=int(variation_token[:2], 16),
+                ),
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    max_output_tokens=1400,
+                    temperature=0.9,
+                    top_p=0.9,
+                ),
+            )
 
-    raw = getattr(response, "text", "")
-    if not raw and hasattr(response, "candidates"):
-        parts = []
-        for candidate in response.candidates:
-            content = getattr(candidate, "content", None)
-            for part in getattr(content, "parts", []) or []:
-                text = getattr(part, "text", "")
-                if text:
-                    parts.append(text)
-        raw = "".join(parts)
+            raw = getattr(response, "text", "")
+            if not raw and hasattr(response, "candidates"):
+                parts = []
+                for candidate in response.candidates:
+                    content = getattr(candidate, "content", None)
+                    for part in getattr(content, "parts", []) or []:
+                        text = getattr(part, "text", "")
+                        if text:
+                            parts.append(text)
+                raw = "".join(parts)
 
-    raw = raw.strip()
-    cleaned = raw
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
+            raw = raw.strip()
+            cleaned = raw
+            if cleaned.startswith("```"):
+                cleaned = cleaned.strip("`")
+                if cleaned.startswith("json"):
+                    cleaned = cleaned[4:]
+                cleaned = cleaned.strip()
 
-    try:
-        posts = json.loads(cleaned)
-        if not isinstance(posts, list) or not posts:
-            raise ValueError("Response was not a non-empty JSON array")
-    except Exception:
-        posts = [raw]
+            try:
+                posts = json.loads(cleaned)
+                if not isinstance(posts, list) or not posts:
+                    raise ValueError("Response was not a non-empty JSON array")
+            except Exception:
+                posts = [raw]
 
-    posts = _dedupe_posts(posts)
-    return posts[: max(num_posts, 1)]
+            posts = _dedupe_posts(posts)
+            return posts[: max(num_posts, 1)]
+        except Exception as exc:  # pragma: no cover - exercised by fallback tests
+            last_error = exc
+            if not _is_transient_gemini_error(exc):
+                raise
+
+    if last_error is not None:
+        raise last_error
+
+    raise RuntimeError("Gemini generation failed with no usable model candidates.")
 
 
 def _retry_unique_posts(generator_func, format_type: str, category: str, guideline: str, num_posts: int, max_attempts: int = 2):

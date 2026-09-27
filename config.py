@@ -41,6 +41,14 @@ GEMINI_API_KEY = _setting("GEMINI_API_KEY")
 # Use a currently supported Gemini model. newer accounts no longer accept the
 # retired gemini-2.5-flash model name.
 GEMINI_MODEL = _setting("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_FALLBACK_MODELS = [
+    model.strip()
+    for model in _setting(
+        "GEMINI_FALLBACK_MODELS",
+        "gemini-2.5-flash,gemini-2.5-flash-lite",
+    ).split(",")
+    if model.strip()
+]
 
 # --- Local Ollama API ------------------------------------------------------
 # Use a lightweight local LLM for more stable downloads and lower RAM usage.
