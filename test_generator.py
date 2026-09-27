@@ -60,7 +60,7 @@ def test_dedupe_posts_removes_duplicates():
     ]
 
 
-def test_generate_with_gemini_tries_fallback_model_on_503(monkeypatch):
+def test_generate_with_gemini_tries_fallback_model_on_404_or_503(monkeypatch):
     calls = []
 
     class FakeClient:
@@ -71,12 +71,12 @@ def test_generate_with_gemini_tries_fallback_model_on_503(monkeypatch):
             @staticmethod
             def generate_content(model, *args, **kwargs):
                 calls.append(model)
-                if model == "gemini-3.6-flash":
-                    raise RuntimeError("503 UNAVAILABLE")
+                if model == "gemini-3.8-flash":
+                    raise RuntimeError("404 NOT_FOUND: This model models/gemini-2.5-flash is no longer available to new users.")
                 return type("Response", (), {"text": '["Fallback post"]'})()
 
-    monkeypatch.setattr(generator, "GEMINI_MODEL", "gemini-3.6-flash")
-    monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["gemini-2.5-flash"])
+    monkeypatch.setattr(generator, "GEMINI_MODEL", "gemini-3.8-flash")
+    monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["gemini-3.8-flash-lite"])
     monkeypatch.setattr(generator, "genai", type("FakeGenAI", (), {"Client": FakeClient}))
     monkeypatch.setattr(generator, "types", type("FakeTypes", (), {"GenerateContentConfig": lambda **kwargs: kwargs}))
     monkeypatch.setattr(generator, "get_sections_reference_text", lambda: "Reference text")
@@ -84,7 +84,7 @@ def test_generate_with_gemini_tries_fallback_model_on_503(monkeypatch):
     result = _generate_with_gemini("Post", "Retirement", "Campaign", 1)
 
     assert result == ["Fallback post"]
-    assert calls == ["gemini-3.6-flash", "gemini-2.5-flash"]
+    assert calls == ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
 
 
 def test_build_system_prompt_uses_premium_social_style():

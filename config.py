@@ -38,14 +38,27 @@ AI_PROVIDER = _setting("AI_PROVIDER", "gemini").lower()
 # --- Google Gemini API ----------------------------------------------------
 GEMINI_API_KEY = _setting("GEMINI_API_KEY")
 
-# Use a currently supported Gemini model. newer accounts no longer accept the
-# retired gemini-2.5-flash model name.
-GEMINI_MODEL = _setting("GEMINI_MODEL", "gemini-3.6-flash")
+def _normalise_gemini_model(model_name: str) -> str:
+    """Map retired Gemini model names to a supported 3.x alternative."""
+    raw = (model_name or "").strip()
+    if not raw:
+        return "gemini-3.8-flash"
+    if raw.startswith("models/"):
+        raw = raw.replace("models/", "", 1)
+    retired = {"gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"}
+    if raw in retired or raw.startswith("gemini-2.5-"):
+        return "gemini-3.8-flash"
+    return raw
+
+
+# Use currently supported Gemini models. Newer accounts reject retired 2.5 model
+# names, so prefer the 3.x family and keep a safe backup from the same generation.
+GEMINI_MODEL = _normalise_gemini_model(_setting("GEMINI_MODEL", "gemini-3.8-flash"))
 GEMINI_FALLBACK_MODELS = [
-    model.strip()
+    _normalise_gemini_model(model.strip())
     for model in _setting(
         "GEMINI_FALLBACK_MODELS",
-        "gemini-2.5-flash,gemini-2.5-flash-lite",
+        "gemini-3.8-flash-lite",
     ).split(",")
     if model.strip()
 ]
