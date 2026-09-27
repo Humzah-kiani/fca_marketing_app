@@ -4,6 +4,7 @@ import pytest
 
 import generator
 import post_studio
+from config import _normalise_gemini_model
 from generator import (
     _build_system_prompt,
     _build_user_prompt,
@@ -85,6 +86,11 @@ def test_generate_with_gemini_tries_fallback_model_on_404_or_503(monkeypatch):
 
     assert result == ["Fallback post"]
     assert calls == ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+
+
+def test_normalise_gemini_model_replaces_audio_preview_models():
+    assert _normalise_gemini_model("gemini-2.5-flash-preview-tts") == "gemini-2.0-flash"
+    assert _normalise_gemini_model("models/gemini-2.5-flash-preview-tts") == "gemini-2.0-flash"
 
 
 def test_build_system_prompt_uses_premium_social_style():
