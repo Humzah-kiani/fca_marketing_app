@@ -288,15 +288,48 @@ def _generate_with_ollama(format_type: str, category: str, guideline: str, num_p
     return posts[: max(num_posts, 1)]
 
 
-def _gemini_model_candidates() -> list[str]:
+def _list_available_gemini_models(client) -> list[str]:
+    """Return model names that support generateContent when the API exposes them."""
+    try:
+        response = client.models.list()
+    except Exception:
+        return []
+
+    names: list[str] = []
+    try:
+        iterator = list(response)
+    except TypeError:
+        iterator = [response]
+
+    for item in iterator:
+        name = getattr(item, "name", None) or (item.get("name") if isinstance(item, dict) else None)
+        if not name:
+            continue
+        if name.startswith("models/"):
+            name = name.replace("models/", "", 1)
+        names.append(name)
+
+    return names
+
+
+def _gemini_model_candidates(client) -> list[str]:
     candidates: list[str] = []
     seen: set[str] = set()
-    for model_name in [GEMINI_MODEL] + list(GEMINI_FALLBACK_MODELS):
+    configured = [GEMINI_MODEL] + list(GEMINI_FALLBACK_MODELS)
+    for model_name in configured:
         model_name = (model_name or "").strip()
         if not model_name or model_name in seen:
             continue
         seen.add(model_name)
         candidates.append(model_name)
+
+    available = _list_available_gemini_models(client)
+    for model_name in available:
+        if not model_name or model_name in seen:
+            continue
+        seen.add(model_name)
+        candidates.append(model_name)
+
     return candidates
 
 
@@ -343,7 +376,7 @@ def _generate_with_gemini(format_type: str, category: str, guideline: str, num_p
     )
 
     last_error: Exception | None = None
-    for model_name in _gemini_model_candidates():
+    for model_name in _gemini_model_candidates(client):
         try:
             variation_token = uuid.uuid4().hex[:8]
             response = client.models.generate_content(

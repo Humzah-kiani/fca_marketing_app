@@ -39,26 +39,27 @@ AI_PROVIDER = _setting("AI_PROVIDER", "gemini").lower()
 GEMINI_API_KEY = _setting("GEMINI_API_KEY")
 
 def _normalise_gemini_model(model_name: str) -> str:
-    """Map retired Gemini model names to a supported 3.x alternative."""
+    """Map retired Gemini model names to a stable fallback that is broadly supported."""
     raw = (model_name or "").strip()
     if not raw:
-        return "gemini-3.8-flash"
+        return "gemini-2.0-flash"
     if raw.startswith("models/"):
         raw = raw.replace("models/", "", 1)
     retired = {"gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"}
     if raw in retired or raw.startswith("gemini-2.5-"):
-        return "gemini-3.8-flash"
+        return "gemini-2.0-flash"
     return raw
 
 
-# Use currently supported Gemini models. Newer accounts reject retired 2.5 model
-# names, so prefer the 3.x family and keep a safe backup from the same generation.
-GEMINI_MODEL = _normalise_gemini_model(_setting("GEMINI_MODEL", "gemini-3.8-flash"))
+# Prefer a model family that is broadly available. The Gemini naming surface is
+# inconsistent across accounts and API versions, so keep a stable default with a
+# small fallback list rather than a single hard-coded model.
+GEMINI_MODEL = _normalise_gemini_model(_setting("GEMINI_MODEL", "gemini-2.0-flash"))
 GEMINI_FALLBACK_MODELS = [
     _normalise_gemini_model(model.strip())
     for model in _setting(
         "GEMINI_FALLBACK_MODELS",
-        "gemini-3.8-flash-lite",
+        "gemini-1.5-flash,gemini-2.0-flash-lite",
     ).split(",")
     if model.strip()
 ]
