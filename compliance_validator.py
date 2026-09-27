@@ -10,7 +10,14 @@ except ImportError:  # pragma: no cover - optional cloud dependency
     genai = None
     types = None
 
-from config import AI_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL
+from config import (
+    AI_PROVIDER,
+    GEMINI_API_KEY,
+    GEMINI_FALLBACK_MODELS,
+    GEMINI_MODEL,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+)
 from fca_monitor import get_sections_reference_text
 
 
@@ -61,10 +68,10 @@ CATEGORY_NOTES = {
 
 def _parse_result(raw: str) -> dict:
     cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`").strip()
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:].strip()
+    start_idx = cleaned.find("{")
+    end_idx = cleaned.rfind("}")
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        cleaned = cleaned[start_idx : end_idx + 1]
 
     result = json.loads(cleaned)
     if not isinstance(result, dict):
@@ -149,7 +156,14 @@ def validate_post(post_text: str, format_type: str, category: str) -> dict:
     try:
         reference_text = get_sections_reference_text()
         if not reference_text:
-            return _fallback_validation(post_text)
+            reference_text = (
+                "FCA Handbook Core Guidance (COBS 4 Financial Promotions & PRIN Principles for Businesses):\n"
+                "- Communications must be clear, fair, and not misleading.\n"
+                "- Never promise or imply guaranteed returns or outcomes.\n"
+                "- Capital and pension investment values can go down as well as up.\n"
+                "- Any stated benefit must be balanced with clear risk statements.\n"
+                "- Avoid high pressure or false urgency."
+            )
 
         prompt = VALIDATION_PROMPT.format(
             category_note=CATEGORY_NOTES.get(category, ""),
@@ -159,61 +173,41 @@ def validate_post(post_text: str, format_type: str, category: str) -> dict:
             post_text=post_text,
         )
 
-        if AI_PROVIDER == "gemini" and GEMINI_API_KEY:
+        if (AI_PROVIDER == "gemini" or GEMINI_API_KEY) and AI_PROVIDER != "ollama":
             if genai is None or types is None:
                 raise RuntimeError("Google GenAI SDK is not installed.")
             client = genai.Client(api_key=GEMINI_API_KEY)
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents="Return the independent compliance review for this draft.",
-                config=types.GenerateContentConfig(
-                    system_instruction=prompt,
-                    max_output_tokens=1000,
-                    temperature=0.1,
-                ),
-            )
-            raw = getattr(response, "text", "")
-            if not raw and hasattr(response, "candidates"):
-                parts = []
-                for candidate in response.candidates:
-                    content = getattr(candidate, "content", None)
-                    for part in getattr(content, "parts", []) or []:
-                        text = getattr(part, "text", "")
-                        if text:
-                            parts.append(text)
-                raw = "".join(parts)
+            models_to_try = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
+            for model_name in models_to_try:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents="Return the independent compliance review for this draft.",
+                        config=types.GenerateContentConfig(
+                            system_instruction=prompt,
+                            max_output_tokens=1000,
+                            temperature=0.1,
+                        ),
+                    )
+                    raw = getattr(response, "text", "")
+                    if not raw and hasattr(response, "candidates"):
+                        parts = []
+                        for candidate in response.candidates:
+                            content = getattr(candidate, "content", None)
+                            for part in getattr(content, "parts", []) or []:
+                                text = getattr(part, "text", "")
+                                if text:
+                                    parts.append(text)
+                        raw = "".join(parts)
+                    if raw:
+                        return _parse_result(raw)
+                except Exception:
+                    continue
         elif AI_PROVIDER == "ollama":
             raw = _call_ollama_json(prompt)
-        elif GEMINI_API_KEY:
-            if genai is None or types is None:
-                raise RuntimeError("Google GenAI SDK is not installed.")
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents="Return the independent compliance review for this draft.",
-                config=types.GenerateContentConfig(
-                    system_instruction=prompt,
-                    max_output_tokens=1000,
-                    temperature=0.1,
-                ),
-            )
-            raw = getattr(response, "text", "")
-            if not raw and hasattr(response, "candidates"):
-                parts = []
-                for candidate in response.candidates:
-                    content = getattr(candidate, "content", None)
-                    for part in getattr(content, "parts", []) or []:
-                        text = getattr(part, "text", "")
-                        if text:
-                            parts.append(text)
-                raw = "".join(parts)
-        else:
-            return _fallback_validation(post_text)
-
-        try:
             return _parse_result(raw)
-        except (TypeError, ValueError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"Compliance validator returned an invalid result: {error}") from error
+        
+        return _fallback_validation(post_text)
     except Exception:
         return _fallback_validation(post_text)
 

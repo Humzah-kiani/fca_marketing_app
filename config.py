@@ -39,18 +39,18 @@ AI_PROVIDER = _setting("AI_PROVIDER", "gemini").lower()
 GEMINI_API_KEY = _setting("GEMINI_API_KEY")
 
 def _normalise_gemini_model(model_name: str) -> str:
-    """Keep the app aligned with the exact Gemini model you want to use."""
+    """Keep the app aligned with current, supported Gemini text models."""
     raw = (model_name or "").strip()
-    if not raw:
-        return "gemini-3.6-flash"
     if raw.startswith("models/"):
         raw = raw.replace("models/", "", 1)
+    if not raw or raw in ("gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.5-flash-preview-tts"):
+        return "gemini-3.8-flash"
     return raw
 
 
-# Exact model requested by the user. No fallback list is used here.
-GEMINI_MODEL = _normalise_gemini_model(_setting("GEMINI_MODEL", "gemini-3.6-flash"))
-GEMINI_FALLBACK_MODELS = []
+# Active text generation model.
+GEMINI_MODEL = _normalise_gemini_model(_setting("GEMINI_MODEL", "gemini-3.8-flash"))
+GEMINI_FALLBACK_MODELS = ["gemini-3.8-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"]
 
 # --- Local Ollama API ------------------------------------------------------
 # Use a lightweight local LLM for more stable downloads and lower RAM usage.

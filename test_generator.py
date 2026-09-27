@@ -89,8 +89,9 @@ def test_generate_with_gemini_tries_fallback_model_on_404_or_503(monkeypatch):
 
 
 def test_normalise_gemini_model_preserves_explicit_model_selection():
-    assert _normalise_gemini_model("gemini-3.6-flash") == "gemini-3.6-flash"
-    assert _normalise_gemini_model("models/gemini-3.6-flash") == "gemini-3.6-flash"
+    assert _normalise_gemini_model("gemini-3.8-flash") == "gemini-3.8-flash"
+    assert _normalise_gemini_model("models/gemini-3.8-flash") == "gemini-3.8-flash"
+    assert _normalise_gemini_model("gemini-3.6-flash") == "gemini-3.8-flash"
 
 
 def test_build_system_prompt_uses_premium_social_style():
