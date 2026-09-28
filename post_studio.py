@@ -848,8 +848,20 @@ def _clean_sample_title(label: str) -> str:
     return " ".join(words) if words else label
 
 
-def build_sample_template_spec(sample_item: dict, brand_name: str = "LOGO", contact: ContactInfo | None = None) -> PostSpec:
-    """Convert any sample design reference asset into a fully editable Canva-style PostSpec template."""
+def build_sample_template_spec(
+    sample_item: dict,
+    brand_name: str = "LOGO",
+    contact: ContactInfo | None = None,
+    theme_key: str | None = None,
+    template_key: str | None = None,
+) -> PostSpec:
+    """Convert a sample design reference into a fully editable PostSpec.
+
+    The sample image is loaded as the background photo, but the template is
+    always chosen so that a solid opaque card panel sits over the text area.
+    This hides the baked-in text from the source .webp so only the editable
+    text layers (Headline / Body / CTA) are visible — exactly like Canva.
+    """
     cat = sample_item.get("category", "Protection")
     label = sample_item.get("label", "")
     fpath = sample_item.get("path", "")
@@ -857,42 +869,49 @@ def build_sample_template_spec(sample_item: dict, brand_name: str = "LOGO", cont
 
     clean_title = _clean_sample_title(label)
 
-    preset = CATEGORY_PRESETS.get(cat, {"theme": "periwinkle", "template": "offset_card"})
-    theme_key = preset["theme"]
-    template_key = preset["template"]
+    # --- pick theme ---------------------------------------------------
+    if not theme_key:
+        preset = CATEGORY_PRESETS.get(cat, {"theme": "periwinkle", "template": "offset_card"})
+        theme_key = preset["theme"]
 
-    l_lower = label.lower()
-    if "first" in l_lower or "mortgage" in l_lower or "sdlt" in l_lower:
-        template_key = "banner" if is_image else "offset_card"
-        theme_key = "brick"
-    elif "retire" in l_lower or "freedom" in l_lower:
-        template_key = "card_photo" if is_image else "offset_card"
-        theme_key = "royal"
-    elif "pension" in l_lower or "savings" in l_lower:
-        template_key = "photo_side" if is_image else "arc"
-        theme_key = "sage"
-    elif "invest" in l_lower or "estate" in l_lower or "diversify" in l_lower:
-        template_key = "circle_photo" if is_image else "offset_card"
-        theme_key = "ivory"
-    elif "critical" in l_lower or "cic" in l_lower or "life" in l_lower or "protect" in l_lower:
-        template_key = "offset_card" if is_image else "card_photo"
-        theme_key = "periwinkle"
-    elif "lifestyle" in l_lower or "future" in l_lower or "holistic" in l_lower:
-        template_key = "arc"
-        theme_key = "mustard"
+    # --- pick template — always card-backed so photo panel is separate -
+    # Templates that place an opaque card over the text area and keep the
+    # photo in its own region: photo_side, card_photo, offset_card.
+    # "banner" (full-bleed photo) is intentionally avoided here because it
+    # would expose the source image's baked-in text under the editable layers.
+    if not template_key:
+        l_lower = label.lower()
+        if "mortgage" in l_lower or "sdlt" in l_lower or "stamp" in l_lower:
+            template_key = "photo_side"
+            theme_key = theme_key or "brick"
+        elif "retire" in l_lower or "freedom" in l_lower or "pension" in l_lower or "savings" in l_lower:
+            template_key = "card_photo"
+            theme_key = theme_key or "royal"
+        elif "invest" in l_lower or "estate" in l_lower or "diversify" in l_lower:
+            template_key = "photo_side"
+            theme_key = theme_key or "ivory"
+        elif "critical" in l_lower or "cic" in l_lower or "life" in l_lower or "protect" in l_lower or "insure" in l_lower or "cover" in l_lower:
+            template_key = "offset_card"
+            theme_key = theme_key or "periwinkle"
+        elif "lifestyle" in l_lower or "future" in l_lower or "holistic" in l_lower or "planning" in l_lower:
+            template_key = "card_photo"
+            theme_key = theme_key or "mustard"
+        else:
+            template_key = "photo_side"
 
-    headline = f"{clean_title}: Important Considerations" if clean_title else f"{cat}: Guidance & Planning"
+    headline = clean_title if clean_title else f"{cat} — Key Considerations"
+    headline = headline[:80]  # keep it to one or two lines
 
     body_copy = {
-        "Retirement": "Planning your retirement strategy early gives you clarity on options, pension scheme rules, and potential tax implications. Capital and pension values can fall as well as rise.",
-        "Investment": "Building a diversified portfolio aligned with your long-term goals and risk appetite. Capital is at risk, and returns are never guaranteed.",
-        "Protection": "Helping safeguard your family's financial security against unexpected life events with tailored insurance cover options.",
-        "Mortgage": "Understanding interest rate terms, deposit requirements, and affordability before securing your home purchase.",
-        "Employee Benefit": "Informational overview of workforce benefits and group scheme options available to your team.",
-        "Investment and Estate Planning": "Structuring wealth efficiently across generations. Tax treatment depends on individual circumstances and may change over time.",
-        "Pension": "Reviewing existing scheme performance and consolidation options to keep your pension aligned with your retirement objectives.",
-        "Lifestyle": "Aligning personal financial strategy with the lifestyle choices and milestones that matter most to you.",
-    }.get(cat, "Financial decisions are personal and depend on your individual circumstances, goals, and risk profile.")
+        "Retirement": "Planning early gives you clarity on pension options and tax implications.\nCapital and pension values can fall as well as rise.",
+        "Investment": "A diversified strategy aligned with your goals and risk appetite.\nCapital is at risk — returns are never guaranteed.",
+        "Protection": "Safeguard your family's financial security against unexpected events\nwith tailored insurance cover designed around your circumstances.",
+        "Mortgage": "Understanding your rate, deposit and affordability before you commit.\nYour home may be at risk if you do not keep up mortgage repayments.",
+        "Employee Benefit": "An informational overview of the workplace benefits and group\nscheme options available to your team.",
+        "Investment and Estate Planning": "Structuring wealth efficiently across generations.\nTax treatment depends on individual circumstances and may change.",
+        "Pension": "Reviewing scheme performance and consolidation options\nto keep your pension aligned with your retirement objectives.",
+        "Lifestyle": "Aligning your financial strategy with the milestones\nand lifestyle choices that matter most to you.",
+    }.get(cat, "Financial decisions are personal and depend on your individual\ncircumstances, goals, and attitude to risk.")
 
     cta = {
         "Mortgage": "Speak to a regulated adviser",
@@ -900,9 +919,13 @@ def build_sample_template_spec(sample_item: dict, brand_name: str = "LOGO", cont
         "Pension": "Review your scheme options",
         "Protection": "Explore your cover options",
         "Investment": "Discuss your portfolio strategy",
-        "Investment and Estate Planning": "Request an advice consultation",
+        "Investment and Estate Planning": "Request a consultation",
+        "Lifestyle": "Start your financial plan",
+        "Employee Benefit": "Find out what's available",
     }.get(cat, "Talk through your options")
 
+    # Load background image — placed in the photo-panel of the template,
+    # NOT as a full-bleed fill, so the card hides baked-in text.
     bg_img = None
     if is_image and os.path.exists(fpath):
         try:
@@ -1175,21 +1198,49 @@ def post_studio_ui() -> None:
                 with c1:
                     st.image(
                         chosen_img["path"],
-                        caption=f"{chosen_img['category']}: {chosen_img['label']}",
+                        caption=f"Reference preview — {chosen_img['label']}",
                         use_container_width=True,
+                    )
+                    st.caption(
+                        "⬆ This is the **reference image** (read-only). "
+                        "When you open it as a template, the image becomes the photo-panel background "
+                        "and a solid card is overlaid on top — your editable text layers (Headline, Body, CTA) "
+                        "sit cleanly on that card, just like Canva."
                     )
                 with c2:
                     st.markdown(f"**Category:** {chosen_img['category']}")
-                    st.markdown(f"**Template:** {chosen_img['label']}")
+                    st.divider()
+                    st.markdown("**Customise before opening:**")
+                    theme_choices = list(THEMES.keys())
+                    default_theme_preset = CATEGORY_PRESETS.get(chosen_img["category"], {}).get("theme", "periwinkle")
+                    default_theme_idx = theme_choices.index(default_theme_preset) if default_theme_preset in theme_choices else 0
+                    chosen_theme = st.selectbox(
+                        "Colour palette",
+                        theme_choices,
+                        index=default_theme_idx,
+                        format_func=lambda k: THEMES[k].label,
+                        key="gallery_theme_pick",
+                    )
+                    layout_choices = list(TEMPLATE_LABELS.keys())
+                    # Default to card-backed layouts — exclude banner from default
+                    card_layouts = [k for k in layout_choices if k != "banner"]
+                    chosen_layout = st.selectbox(
+                        "Layout (card always covers the text area)",
+                        card_layouts,
+                        format_func=lambda k: TEMPLATE_LABELS[k],
+                        key="gallery_layout_pick",
+                    )
                     st.caption(
-                        "Opening this template creates a fully editable design: "
-                        "headline, body, CTA, layout, palette, logo and contact are all pre-filled and freely editable."
+                        "The layout places an opaque card panel over part of the canvas. "
+                        "Your text layers render on the card — the reference image fills the photo region on the other side."
                     )
                     if st.button("✏️ Open as Editable Template", key="btn_open_editable_template", type="primary"):
                         st.session_state["spec"] = build_sample_template_spec(
                             chosen_img,
                             brand_name="LOGO",
                             contact=spec.contact,
+                            theme_key=chosen_theme,
+                            template_key=chosen_layout,
                         )
                         st.rerun()
 
