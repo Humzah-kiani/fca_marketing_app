@@ -838,6 +838,92 @@ def get_sample_designs() -> list[dict]:
     return designs
 
 
+def _clean_sample_title(label: str) -> str:
+    """Clean filename stems into readable title strings."""
+    import re
+    s = re.sub(r'\d+x\d+', '', label)
+    s = re.sub(r'\b\d{6,8}\b', '', s)
+    s = s.replace('Post', '').replace('Graphic', '').replace('Modern', '').replace('Cover', '').strip()
+    words = [w.capitalize() for w in s.split() if w.strip()]
+    return " ".join(words) if words else label
+
+
+def build_sample_template_spec(sample_item: dict, brand_name: str = "LOGO", contact: ContactInfo | None = None) -> PostSpec:
+    """Convert any sample design reference asset into a fully editable Canva-style PostSpec template."""
+    cat = sample_item.get("category", "Protection")
+    label = sample_item.get("label", "")
+    fpath = sample_item.get("path", "")
+    is_image = sample_item.get("is_image", False)
+
+    clean_title = _clean_sample_title(label)
+
+    preset = CATEGORY_PRESETS.get(cat, {"theme": "periwinkle", "template": "offset_card"})
+    theme_key = preset["theme"]
+    template_key = preset["template"]
+
+    l_lower = label.lower()
+    if "first" in l_lower or "mortgage" in l_lower or "sdlt" in l_lower:
+        template_key = "banner" if is_image else "offset_card"
+        theme_key = "brick"
+    elif "retire" in l_lower or "freedom" in l_lower:
+        template_key = "card_photo" if is_image else "offset_card"
+        theme_key = "royal"
+    elif "pension" in l_lower or "savings" in l_lower:
+        template_key = "photo_side" if is_image else "arc"
+        theme_key = "sage"
+    elif "invest" in l_lower or "estate" in l_lower or "diversify" in l_lower:
+        template_key = "circle_photo" if is_image else "offset_card"
+        theme_key = "ivory"
+    elif "critical" in l_lower or "cic" in l_lower or "life" in l_lower or "protect" in l_lower:
+        template_key = "offset_card" if is_image else "card_photo"
+        theme_key = "periwinkle"
+    elif "lifestyle" in l_lower or "future" in l_lower or "holistic" in l_lower:
+        template_key = "arc"
+        theme_key = "mustard"
+
+    headline = f"{clean_title}: Important Considerations" if clean_title else f"{cat}: Guidance & Planning"
+
+    body_copy = {
+        "Retirement": "Planning your retirement strategy early gives you clarity on options, pension scheme rules, and potential tax implications. Capital and pension values can fall as well as rise.",
+        "Investment": "Building a diversified portfolio aligned with your long-term goals and risk appetite. Capital is at risk, and returns are never guaranteed.",
+        "Protection": "Helping safeguard your family's financial security against unexpected life events with tailored insurance cover options.",
+        "Mortgage": "Understanding interest rate terms, deposit requirements, and affordability before securing your home purchase.",
+        "Employee Benefit": "Informational overview of workforce benefits and group scheme options available to your team.",
+        "Investment and Estate Planning": "Structuring wealth efficiently across generations. Tax treatment depends on individual circumstances and may change over time.",
+        "Pension": "Reviewing existing scheme performance and consolidation options to keep your pension aligned with your retirement objectives.",
+        "Lifestyle": "Aligning personal financial strategy with the lifestyle choices and milestones that matter most to you.",
+    }.get(cat, "Financial decisions are personal and depend on your individual circumstances, goals, and risk profile.")
+
+    cta = {
+        "Mortgage": "Speak to a regulated adviser",
+        "Retirement": "Book a retirement review",
+        "Pension": "Review your scheme options",
+        "Protection": "Explore your cover options",
+        "Investment": "Discuss your portfolio strategy",
+        "Investment and Estate Planning": "Request an advice consultation",
+    }.get(cat, "Talk through your options")
+
+    bg_img = None
+    if is_image and os.path.exists(fpath):
+        try:
+            bg_img = Image.open(fpath).convert("RGB")
+        except Exception:
+            bg_img = None
+
+    return new_post(
+        headline=headline,
+        body=body_copy,
+        cta=cta,
+        category=cat,
+        brand_name=brand_name,
+        background_image=bg_img,
+        contact=contact,
+        template=template_key,
+        theme=theme_key,
+        fmt="square",
+    )
+
+
 def _open_image(src) -> Image.Image | None:
     if src is None:
         return None
@@ -1062,29 +1148,65 @@ def post_studio_ui() -> None:
 
     sample_assets = get_sample_designs()
     if sample_assets:
-        with st.expander("🎨 Sample Design References Gallery (52 Variety Presets)", expanded=False):
-            st.caption("Browse reference designs by category and apply sample images directly to your post canvas.")
+        with st.expander("🎨 Sample Design Templates — Open & Edit Like Canva", expanded=False):
+            st.caption(
+                "Pick any sample design below and click **Open as Editable Template** to load it as a fully editable post. "
+                "You can then change the headline, body text, colors, layout, logo, contact info and more — just like Canva."
+            )
             categories_found = sorted(list({a["category"] for a in sample_assets}))
             sel_cat = st.selectbox("Filter by Category", ["All"] + categories_found, key="ref_gallery_cat")
 
-            filtered_assets = [a for a in sample_assets if sel_cat == "All" or a["category"] == sel_cat]
-            asset_options = [f"{a['category']} — {a['label']} ({'Video' if a['is_video'] else 'Image'})" for a in filtered_assets]
+            image_assets = [a for a in sample_assets if a["is_image"]]
+            video_assets = [a for a in sample_assets if a["is_video"]]
+            filtered_imgs = [a for a in image_assets if sel_cat == "All" or a["category"] == sel_cat]
+            filtered_vids = [a for a in video_assets if sel_cat == "All" or a["category"] == sel_cat]
 
-            if asset_options:
-                idx = st.selectbox("Select Sample Design Asset", range(len(asset_options)), format_func=lambda i: asset_options[i], key="ref_gallery_asset")
-                chosen_asset = filtered_assets[idx]
-
-                if chosen_asset["is_image"]:
-                    st.image(chosen_asset["path"], caption=f"Sample Image ({chosen_asset['category']}): {chosen_asset['label']}", use_container_width=True)
-                    if st.button("Apply as Canvas Background Photo", key="btn_apply_gallery_bg"):
-                        spec.background.image = Image.open(chosen_asset["path"]).convert("RGB")
-                        st.success(f"Applied sample background: {chosen_asset['label']}")
+            if filtered_imgs:
+                st.markdown("**📸 Image Templates**")
+                img_options = [f"{a['category']} — {a['label']}" for a in filtered_imgs]
+                img_idx = st.selectbox(
+                    "Select Image Template",
+                    range(len(img_options)),
+                    format_func=lambda i: img_options[i],
+                    key="ref_gallery_img_asset",
+                )
+                chosen_img = filtered_imgs[img_idx]
+                c1, c2 = st.columns([3, 2])
+                with c1:
+                    st.image(
+                        chosen_img["path"],
+                        caption=f"{chosen_img['category']}: {chosen_img['label']}",
+                        use_container_width=True,
+                    )
+                with c2:
+                    st.markdown(f"**Category:** {chosen_img['category']}")
+                    st.markdown(f"**Template:** {chosen_img['label']}")
+                    st.caption(
+                        "Opening this template creates a fully editable design: "
+                        "headline, body, CTA, layout, palette, logo and contact are all pre-filled and freely editable."
+                    )
+                    if st.button("✏️ Open as Editable Template", key="btn_open_editable_template", type="primary"):
+                        st.session_state["spec"] = build_sample_template_spec(
+                            chosen_img,
+                            brand_name="LOGO",
+                            contact=spec.contact,
+                        )
                         st.rerun()
-                elif chosen_asset["is_video"]:
-                    st.video(chosen_asset["path"])
-                    st.caption(f"Sample Video ({chosen_asset['category']}): {chosen_asset['label']}")
 
-    with st.expander("Start a new draft", expanded=False):
+            if filtered_vids:
+                st.divider()
+                st.markdown("**🎬 Video References** *(view only — use as inspiration)*")
+                vid_options = [f"{a['category']} — {a['label']}" for a in filtered_vids]
+                vid_idx = st.selectbox(
+                    "Select Video Reference",
+                    range(len(vid_options)),
+                    format_func=lambda i: vid_options[i],
+                    key="ref_gallery_vid_asset",
+                )
+                st.video(filtered_vids[vid_idx]["path"])
+                st.caption(f"{filtered_vids[vid_idx]['category']}: {filtered_vids[vid_idx]['label']}")
+
+    with st.expander("Start a new draft from scratch", expanded=False):
         d1, d2 = st.columns(2)
         category = d1.selectbox("Category", list(CATEGORY_PRESETS))
         fmt = d2.selectbox("Format", list(FORMATS),
@@ -1093,23 +1215,12 @@ def post_studio_ui() -> None:
         body = st.text_area("Body", "", height=70)
         bullets_raw = st.text_area("Bullets (one per line — replaces body)", "", height=70)
         cta = st.text_input("Call to action", "")
-
-        sample_imgs = [a for a in sample_assets if a["is_image"]]
-        draft_bg_path = None
-        if sample_imgs:
-            matching_samples = [a for a in sample_imgs if a["category"] == category]
-            opts_samples = matching_samples if matching_samples else sample_imgs
-            s_options = ["(Flat Color / None)"] + [f"{a['category']} — {a['label']}" for a in opts_samples]
-            s_idx = st.selectbox("Sample Design Background (Optional)", range(len(s_options)), format_func=lambda i: s_options[i], key="draft_sample_bg")
-            if s_idx > 0:
-                draft_bg_path = opts_samples[s_idx - 1]["path"]
-
         if st.button("Generate draft", type="primary"):
             st.session_state["spec"] = new_post(
                 headline, body, tuple(l for l in bullets_raw.splitlines() if l.strip()),
                 cta, category=category, fmt=fmt,
                 logo_image=spec.logo.image,
-                background_image=draft_bg_path or spec.background.image,
+                background_image=spec.background.image,
                 contact=spec.contact,
             )
             st.rerun()
@@ -1137,21 +1248,9 @@ def post_studio_ui() -> None:
 
         if selected is None:
             st.markdown("**Background photo**")
-            up = st.file_uploader("Replace photo (Upload custom)", type=["jpg", "jpeg", "png", "webp"], key="bg_up")
+            up = st.file_uploader("Upload custom photo", type=["jpg", "jpeg", "png", "webp"], key="bg_up")
             if up is not None:
                 spec.background.image = Image.open(up).convert("RGB")
-
-            sample_imgs = [a for a in sample_assets if a["is_image"]]
-            if sample_imgs:
-                st.caption("Or select from Sample Design References:")
-                sample_opts = ["(None selected)"] + [f"{a['category']} — {a['label']}" for a in sample_imgs]
-                chosen_idx = st.selectbox("Select Sample Design Background", range(len(sample_opts)), format_func=lambda i: sample_opts[i], key="bg_sample_select")
-                if chosen_idx > 0:
-                    chosen_sample = sample_imgs[chosen_idx - 1]
-                    if st.button("Load Selected Sample Design Background", key="btn_load_sample_bg"):
-                        spec.background.image = Image.open(chosen_sample["path"]).convert("RGB")
-                        st.rerun()
-
             if spec.background.image is not None:
                 fc = st.columns(3)
                 spec.background.focus_x = fc[0].slider("Focus X", 0.0, 1.0, spec.background.focus_x, 0.01)
