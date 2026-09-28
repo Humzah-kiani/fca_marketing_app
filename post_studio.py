@@ -54,7 +54,7 @@ __all__ = [
     "THEMES", "FORMATS", "TEMPLATES", "TEMPLATE_LABELS", "CATEGORY_PRESETS",
     "FONT_FAMILIES",
     "new_post", "render", "default_logo", "build_post_canvas",
-    "missing_fonts", "post_studio_ui",
+    "missing_fonts", "post_studio_ui", "get_sample_designs",
 ]
 
 
@@ -807,6 +807,37 @@ def draw_contact(c: Canvas, contact: ContactInfo, y_frac: float, margin_frac: fl
 # ---------------------------------------------------------------------------
 
 
+def get_sample_designs() -> list[dict]:
+    """Discover all sample reference design assets in the sample_design_references directory."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    ref_dir = os.path.join(base_dir, "sample_design_references")
+    designs = []
+    if not os.path.exists(ref_dir):
+        return designs
+    for cat in sorted(os.listdir(ref_dir)):
+        cat_path = os.path.join(ref_dir, cat)
+        if os.path.isdir(cat_path):
+            for fname in sorted(os.listdir(cat_path)):
+                if fname.startswith('.'):
+                    continue
+                fpath = os.path.join(cat_path, fname)
+                ext = os.path.splitext(fname)[1].lower()
+                is_video = ext in ('.mp4', '.mov', '.avi', '.mkv')
+                is_image = ext in ('.webp', '.png', '.jpg', '.jpeg')
+                if is_image or is_video:
+                    label = fname.replace('-', ' ').replace('_', ' ')
+                    label = os.path.splitext(label)[0]
+                    designs.append({
+                        'category': cat,
+                        'filename': fname,
+                        'path': fpath,
+                        'label': label,
+                        'is_video': is_video,
+                        'is_image': is_image,
+                    })
+    return designs
+
+
 def _open_image(src) -> Image.Image | None:
     if src is None:
         return None
@@ -1019,6 +1050,30 @@ def post_studio_ui() -> None:
         st.info("Fallback fonts in use for: " + ", ".join(gaps) +
                 ". Drop .ttf files into ./assets/fonts to match the house style exactly.")
 
+    sample_assets = get_sample_designs()
+    if sample_assets:
+        with st.expander("🎨 Sample Design References Gallery (52 Variety Presets)", expanded=False):
+            st.caption("Browse reference designs by category and apply sample images directly to your post canvas.")
+            categories_found = sorted(list({a["category"] for a in sample_assets}))
+            sel_cat = st.selectbox("Filter by Category", ["All"] + categories_found, key="ref_gallery_cat")
+
+            filtered_assets = [a for a in sample_assets if sel_cat == "All" or a["category"] == sel_cat]
+            asset_options = [f"{a['category']} — {a['label']} ({'Video' if a['is_video'] else 'Image'})" for a in filtered_assets]
+
+            if asset_options:
+                idx = st.selectbox("Select Sample Design Asset", range(len(asset_options)), format_func=lambda i: asset_options[i], key="ref_gallery_asset")
+                chosen_asset = filtered_assets[idx]
+
+                if chosen_asset["is_image"]:
+                    st.image(chosen_asset["path"], caption=f"Sample Image ({chosen_asset['category']}): {chosen_asset['label']}", use_container_width=True)
+                    if st.button("Apply as Canvas Background Photo", key="btn_apply_gallery_bg"):
+                        spec.background.image = Image.open(chosen_asset["path"]).convert("RGB")
+                        st.success(f"Applied sample background: {chosen_asset['label']}")
+                        st.rerun()
+                elif chosen_asset["is_video"]:
+                    st.video(chosen_asset["path"])
+                    st.caption(f"Sample Video ({chosen_asset['category']}): {chosen_asset['label']}")
+
     if "spec" not in st.session_state:
         st.session_state["spec"] = new_post(
             "A Lifetime of Cover, for a Lifetime of Love",
@@ -1038,11 +1093,23 @@ def post_studio_ui() -> None:
         body = st.text_area("Body", "", height=70)
         bullets_raw = st.text_area("Bullets (one per line — replaces body)", "", height=70)
         cta = st.text_input("Call to action", "")
+
+        sample_imgs = [a for a in sample_assets if a["is_image"]]
+        draft_bg_path = None
+        if sample_imgs:
+            matching_samples = [a for a in sample_imgs if a["category"] == category]
+            opts_samples = matching_samples if matching_samples else sample_imgs
+            s_options = ["(Flat Color / None)"] + [f"{a['category']} — {a['label']}" for a in opts_samples]
+            s_idx = st.selectbox("Sample Design Background (Optional)", range(len(s_options)), format_func=lambda i: s_options[i], key="draft_sample_bg")
+            if s_idx > 0:
+                draft_bg_path = opts_samples[s_idx - 1]["path"]
+
         if st.button("Generate draft", type="primary"):
             st.session_state["spec"] = new_post(
                 headline, body, tuple(l for l in bullets_raw.splitlines() if l.strip()),
                 cta, category=category, fmt=fmt,
-                logo_image=spec.logo.image, background_image=spec.background.image,
+                logo_image=spec.logo.image,
+                background_image=draft_bg_path or spec.background.image,
                 contact=spec.contact,
             )
             st.rerun()
@@ -1070,9 +1137,21 @@ def post_studio_ui() -> None:
 
         if selected is None:
             st.markdown("**Background photo**")
-            up = st.file_uploader("Replace photo", type=["jpg", "jpeg", "png", "webp"], key="bg_up")
+            up = st.file_uploader("Replace photo (Upload custom)", type=["jpg", "jpeg", "png", "webp"], key="bg_up")
             if up is not None:
                 spec.background.image = Image.open(up).convert("RGB")
+
+            sample_imgs = [a for a in sample_assets if a["is_image"]]
+            if sample_imgs:
+                st.caption("Or select from Sample Design References:")
+                sample_opts = ["(None selected)"] + [f"{a['category']} — {a['label']}" for a in sample_imgs]
+                chosen_idx = st.selectbox("Select Sample Design Background", range(len(sample_opts)), format_func=lambda i: sample_opts[i], key="bg_sample_select")
+                if chosen_idx > 0:
+                    chosen_sample = sample_imgs[chosen_idx - 1]
+                    if st.button("Load Selected Sample Design Background", key="btn_load_sample_bg"):
+                        spec.background.image = Image.open(chosen_sample["path"]).convert("RGB")
+                        st.rerun()
+
             if spec.background.image is not None:
                 fc = st.columns(3)
                 spec.background.focus_x = fc[0].slider("Focus X", 0.0, 1.0, spec.background.focus_x, 0.01)
