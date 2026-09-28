@@ -1050,6 +1050,16 @@ def post_studio_ui() -> None:
         st.info("Fallback fonts in use for: " + ", ".join(gaps) +
                 ". Drop .ttf files into ./assets/fonts to match the house style exactly.")
 
+    if "spec" not in st.session_state:
+        st.session_state["spec"] = new_post(
+            "A Lifetime of Cover, for a Lifetime of Love",
+            "Whole of Life insurance offers fixed protection, helping ensure loved ones "
+            "are taken care of no matter when it's needed.",
+            category="Protection",
+        )
+
+    spec: PostSpec = st.session_state["spec"]
+
     sample_assets = get_sample_designs()
     if sample_assets:
         with st.expander("🎨 Sample Design References Gallery (52 Variety Presets)", expanded=False):
@@ -1073,16 +1083,6 @@ def post_studio_ui() -> None:
                 elif chosen_asset["is_video"]:
                     st.video(chosen_asset["path"])
                     st.caption(f"Sample Video ({chosen_asset['category']}): {chosen_asset['label']}")
-
-    if "spec" not in st.session_state:
-        st.session_state["spec"] = new_post(
-            "A Lifetime of Cover, for a Lifetime of Love",
-            "Whole of Life insurance offers fixed protection, helping ensure loved ones "
-            "are taken care of no matter when it's needed.",
-            category="Protection",
-        )
-
-    spec: PostSpec = st.session_state["spec"]
 
     with st.expander("Start a new draft", expanded=False):
         d1, d2 = st.columns(2)
