@@ -854,13 +854,24 @@ def build_sample_template_spec(
     contact: ContactInfo | None = None,
     theme_key: str | None = None,
     template_key: str | None = None,
+    use_reference_image: bool = False,
 ) -> PostSpec:
     """Convert a sample design reference into a fully editable PostSpec.
 
-    The sample image is loaded as the background photo, but the template is
-    always chosen so that a solid opaque card panel sits over the text area.
-    This hides the baked-in text from the source .webp so only the editable
-    text layers (Headline / Body / CTA) are visible — exactly like Canva.
+    By default NOTHING from the sample's raster file ends up in the result —
+    only its *category*, and therefore its matched palette/layout/copy, is
+    carried over. The post is built the same way `new_post()` builds a fresh
+    draft: a procedurally-painted template (flat colour panels, peek slabs,
+    card) plus independent Headline / Body / CTA / Logo / Contact layers.
+    Every pixel is either a themed shape (recolourable by switching palette
+    or layout) or a layer the editor already knows how to edit — so the
+    sample acts purely as a starting point, the way opening a template in
+    Canva does, rather than as a locked-in picture.
+
+    Pass `use_reference_image=True` if the person explicitly wants the
+    sample's photo itself to become their background photo (still editable
+    afterwards via the normal background-photo controls — replace, crop,
+    zoom, or remove it entirely).
     """
     cat = sample_item.get("category", "Protection")
     label = sample_item.get("label", "")
@@ -924,10 +935,12 @@ def build_sample_template_spec(
         "Employee Benefit": "Find out what's available",
     }.get(cat, "Talk through your options")
 
-    # Load background image — placed in the photo-panel of the template,
-    # NOT as a full-bleed fill, so the card hides baked-in text.
+    # The sample raster is reference-only by default — it is shown as a
+    # read-only preview in the gallery but is NOT baked into the result, so
+    # every element of the opened template stays a genuine, editable layer.
+    # Only load it as the background photo if the person opted in.
     bg_img = None
-    if is_image and os.path.exists(fpath):
+    if use_reference_image and is_image and os.path.exists(fpath):
         try:
             bg_img = Image.open(fpath).convert("RGB")
         except Exception:
@@ -1145,6 +1158,30 @@ def _layer_controls(st, spec: PostSpec, layer: TextLayer) -> None:
             st.rerun()
 
 
+def _inject_studio_theme(st) -> None:
+    st.markdown(
+        """
+        <style>
+        .ps-header{background:linear-gradient(120deg,#0f1f33 0%,#1e3a5f 100%);
+            border-radius:12px;padding:20px 24px;margin-bottom:14px;}
+        .ps-header h2{color:#fff;font-size:1.3rem;font-weight:700;margin:0 0 4px 0;}
+        .ps-header p{color:#c7d4e6;font-size:0.88rem;margin:0;line-height:1.5;}
+        .ps-step{display:inline-flex;align-items:center;gap:8px;font-weight:700;
+            color:#1e2a3a;font-size:0.95rem;margin:4px 0 10px 0;}
+        .ps-step .num{display:inline-flex;align-items:center;justify-content:center;
+            width:22px;height:22px;border-radius:50%;background:#2563eb;color:#fff;
+            font-size:0.72rem;flex-shrink:0;}
+        .ps-notice{background:#fff7e6;border:1px solid #f3d9a8;border-left:4px solid #b45309;
+            border-radius:0 8px 8px 0;padding:8px 14px;margin-bottom:14px;color:#6b4a12;
+            font-size:0.85rem;}
+        .ps-card{border:1px solid #e3e9f0;border-radius:10px;padding:16px 18px;
+            background:#ffffff;margin-bottom:12px;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def post_studio_ui() -> None:
     """A complete post editor page: draft generator + per-layer controls +
     live preview + PNG download. Pure Streamlit + Pillow, no JS."""
@@ -1152,12 +1189,26 @@ def post_studio_ui() -> None:
 
     import streamlit as st
 
-    st.subheader("Post studio")
+    _inject_studio_theme(st)
+
+    st.markdown(
+        """
+        <div class="ps-header">
+            <h2>🖌️ Post studio</h2>
+            <p>Build a branded social post from a sample template or a blank draft, then fine-tune
+            every headline, image and colour as its own independent, editable layer.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     gaps = missing_fonts()
     if gaps:
-        st.info("Fallback fonts in use for: " + ", ".join(gaps) +
-                ". Drop .ttf files into ./assets/fonts to match the house style exactly.")
+        st.markdown(
+            f'<div class="ps-notice">Fallback fonts in use for: {", ".join(gaps)}. '
+            f"Drop .ttf files into ./assets/fonts to match the house style exactly.</div>",
+            unsafe_allow_html=True,
+        )
 
     if "spec" not in st.session_state:
         st.session_state["spec"] = new_post(
@@ -1169,95 +1220,16 @@ def post_studio_ui() -> None:
 
     spec: PostSpec = st.session_state["spec"]
 
-    sample_assets = get_sample_designs()
-    if sample_assets:
-        with st.expander("🎨 Sample Design Templates — Open & Edit Like Canva", expanded=False):
-            st.caption(
-                "Pick any sample design below and click **Open as Editable Template** to load it as a fully editable post. "
-                "You can then change the headline, body text, colors, layout, logo, contact info and more — just like Canva."
-            )
-            categories_found = sorted(list({a["category"] for a in sample_assets}))
-            sel_cat = st.selectbox("Filter by Category", ["All"] + categories_found, key="ref_gallery_cat")
+    # ----------------------------------------------------- Step 1: starting point
+    st.markdown('<div class="ps-step"><span class="num">1</span> Choose a starting point</div>',
+                unsafe_allow_html=True)
 
-            image_assets = [a for a in sample_assets if a["is_image"]]
-            video_assets = [a for a in sample_assets if a["is_video"]]
-            filtered_imgs = [a for a in image_assets if sel_cat == "All" or a["category"] == sel_cat]
-            filtered_vids = [a for a in video_assets if sel_cat == "All" or a["category"] == sel_cat]
+    tab_samples, tab_blank = st.tabs(["🎨 Sample templates", "✏️ Start from scratch"])
 
-            if filtered_imgs:
-                st.markdown("**📸 Image Templates**")
-                img_options = [f"{a['category']} — {a['label']}" for a in filtered_imgs]
-                img_idx = st.selectbox(
-                    "Select Image Template",
-                    range(len(img_options)),
-                    format_func=lambda i: img_options[i],
-                    key="ref_gallery_img_asset",
-                )
-                chosen_img = filtered_imgs[img_idx]
-                c1, c2 = st.columns([3, 2])
-                with c1:
-                    st.image(
-                        chosen_img["path"],
-                        caption=f"Reference preview — {chosen_img['label']}",
-                        use_container_width=True,
-                    )
-                    st.caption(
-                        "⬆ This is the **reference image** (read-only). "
-                        "When you open it as a template, the image becomes the photo-panel background "
-                        "and a solid card is overlaid on top — your editable text layers (Headline, Body, CTA) "
-                        "sit cleanly on that card, just like Canva."
-                    )
-                with c2:
-                    st.markdown(f"**Category:** {chosen_img['category']}")
-                    st.divider()
-                    st.markdown("**Customise before opening:**")
-                    theme_choices = list(THEMES.keys())
-                    default_theme_preset = CATEGORY_PRESETS.get(chosen_img["category"], {}).get("theme", "periwinkle")
-                    default_theme_idx = theme_choices.index(default_theme_preset) if default_theme_preset in theme_choices else 0
-                    chosen_theme = st.selectbox(
-                        "Colour palette",
-                        theme_choices,
-                        index=default_theme_idx,
-                        format_func=lambda k: THEMES[k].label,
-                        key="gallery_theme_pick",
-                    )
-                    layout_choices = list(TEMPLATE_LABELS.keys())
-                    # Default to card-backed layouts — exclude banner from default
-                    card_layouts = [k for k in layout_choices if k != "banner"]
-                    chosen_layout = st.selectbox(
-                        "Layout (card always covers the text area)",
-                        card_layouts,
-                        format_func=lambda k: TEMPLATE_LABELS[k],
-                        key="gallery_layout_pick",
-                    )
-                    st.caption(
-                        "The layout places an opaque card panel over part of the canvas. "
-                        "Your text layers render on the card — the reference image fills the photo region on the other side."
-                    )
-                    if st.button("✏️ Open as Editable Template", key="btn_open_editable_template", type="primary"):
-                        st.session_state["spec"] = build_sample_template_spec(
-                            chosen_img,
-                            brand_name="LOGO",
-                            contact=spec.contact,
-                            theme_key=chosen_theme,
-                            template_key=chosen_layout,
-                        )
-                        st.rerun()
+    with tab_samples:
+        _sample_gallery_ui(st, spec)
 
-            if filtered_vids:
-                st.divider()
-                st.markdown("**🎬 Video References** *(view only — use as inspiration)*")
-                vid_options = [f"{a['category']} — {a['label']}" for a in filtered_vids]
-                vid_idx = st.selectbox(
-                    "Select Video Reference",
-                    range(len(vid_options)),
-                    format_func=lambda i: vid_options[i],
-                    key="ref_gallery_vid_asset",
-                )
-                st.video(filtered_vids[vid_idx]["path"])
-                st.caption(f"{filtered_vids[vid_idx]['category']}: {filtered_vids[vid_idx]['label']}")
-
-    with st.expander("Start a new draft from scratch", expanded=False):
+    with tab_blank:
         d1, d2 = st.columns(2)
         category = d1.selectbox("Category", list(CATEGORY_PRESETS))
         fmt = d2.selectbox("Format", list(FORMATS),
@@ -1276,84 +1248,266 @@ def post_studio_ui() -> None:
             )
             st.rerun()
 
+    st.divider()
+
+    # ----------------------------------------------------- Step 2: edit + preview
+    st.markdown('<div class="ps-step"><span class="num">2</span> Edit layers &amp; export</div>',
+                unsafe_allow_html=True)
+
     left, right = st.columns([5, 6], gap="large")
 
     with left:
-        st.markdown("**Edit a layer**")
-        options = ["— Background photo —", "— Logo —", "— Contact info —"] + \
-                  [f"{t.label}" for t in spec.text_layers]
-        ids = [None, "__logo__", "__contact__"] + [t.id for t in spec.text_layers]
-        default_idx = 3 if spec.text_layers else 0
-        choice = st.selectbox("Layer", range(len(options)), format_func=lambda i: options[i],
-                              index=default_idx)
-        selected = ids[choice]
-
-        if st.button("+ Add text box"):
-            new_layer = TextLayer(text="New text", x=0.1, y=0.1, w=0.5, kind="custom", label="Custom text",
-                                  style=TextStyle(family="display", size=32,
-                                                  color=THEMES[spec.theme].ink))
-            spec.text_layers.append(new_layer)
-            st.rerun()
-
-        st.divider()
-
-        if selected is None:
-            st.markdown("**Background photo**")
-            up = st.file_uploader("Upload custom photo", type=["jpg", "jpeg", "png", "webp"], key="bg_up")
-            if up is not None:
-                spec.background.image = Image.open(up).convert("RGB")
-            if spec.background.image is not None:
-                fc = st.columns(3)
-                spec.background.focus_x = fc[0].slider("Focus X", 0.0, 1.0, spec.background.focus_x, 0.01)
-                spec.background.focus_y = fc[1].slider("Focus Y", 0.0, 1.0, spec.background.focus_y, 0.01)
-                spec.background.zoom = fc[2].slider("Zoom", 1.0, 2.0, spec.background.zoom, 0.05)
-                if st.button("Remove photo"):
-                    spec.background.image = None
+        with st.container(border=True):
+            with st.expander("🎨 Template style — palette & layout", expanded=False):
+                st.caption(
+                    "Change these any time, on any post — whether it was started blank, generated "
+                    "from a brief, or opened from a sample. The panels, peek slabs and card recolour "
+                    "instantly; your text, logo and contact layers keep their content and simply "
+                    "re-render on top."
+                )
+                theme_choices = list(THEMES.keys())
+                new_theme = st.selectbox(
+                    "Colour palette", theme_choices,
+                    index=theme_choices.index(spec.theme) if spec.theme in theme_choices else 0,
+                    format_func=lambda k: THEMES[k].label, key="tpl_theme_pick",
+                )
+                layout_choices = list(TEMPLATE_LABELS.keys())
+                new_layout = st.selectbox(
+                    "Layout", layout_choices,
+                    index=layout_choices.index(spec.template) if spec.template in layout_choices else 0,
+                    format_func=lambda k: TEMPLATE_LABELS[k], key="tpl_layout_pick",
+                )
+                if new_theme != spec.theme or new_layout != spec.template:
+                    spec.theme = new_theme
+                    spec.template = new_layout
                     st.rerun()
-            else:
-                st.caption("No photo set — the template's flat background is used.")
 
-        elif selected == "__logo__":
-            st.markdown("**Logo**")
-            st.caption("A default placeholder logo is shown until you upload one.")
-            up = st.file_uploader("Replace logo (PNG, transparent background works best)",
-                                  type=["png", "jpg", "jpeg"], key="logo_up")
-            if up is not None:
-                spec.logo.image = Image.open(up).convert("RGBA")
-                spec.logo.is_default = False
-            if not spec.logo.is_default and st.button("Revert to default logo"):
-                spec.logo.image = None
-                spec.logo.is_default = True
+            st.markdown("**Edit a layer**")
+            options = ["— Background photo —", "— Logo —", "— Contact info —"] + \
+                      [f"{t.label}" for t in spec.text_layers]
+            ids = [None, "__logo__", "__contact__"] + [t.id for t in spec.text_layers]
+            default_idx = 3 if spec.text_layers else 0
+            choice = st.selectbox("Layer", range(len(options)), format_func=lambda i: options[i],
+                                  index=default_idx)
+            selected = ids[choice]
+
+            if st.button("+ Add text box"):
+                new_layer = TextLayer(text="New text", x=0.1, y=0.1, w=0.5, kind="custom", label="Custom text",
+                                      style=TextStyle(family="display", size=32,
+                                                      color=THEMES[spec.theme].ink))
+                spec.text_layers.append(new_layer)
                 st.rerun()
-            lc = st.columns(3)
-            spec.logo.x = lc[0].slider("X", 0.0, 0.9, spec.logo.x, 0.01)
-            spec.logo.y = lc[1].slider("Y", 0.0, 0.9, spec.logo.y, 0.01)
-            spec.logo.w = lc[2].slider("Size", 0.04, 0.4, spec.logo.w, 0.01)
-            spec.logo.visible = st.checkbox("Visible", spec.logo.visible)
 
-        elif selected == "__contact__":
-            st.markdown("**Contact info**")
-            spec.contact.phone = st.text_input("Phone", spec.contact.phone)
-            spec.contact.show_phone = st.checkbox("Show phone", spec.contact.show_phone)
-            spec.contact.email = st.text_input("Email", spec.contact.email)
-            spec.contact.show_email = st.checkbox("Show email", spec.contact.show_email)
-            spec.contact.website = st.text_input("Website", spec.contact.website)
-            spec.contact.show_website = st.checkbox("Show website", spec.contact.show_website)
-            spec.contact.color = _color_picker(st, "Text colour", spec.contact.color, "contact_color")
+            st.divider()
 
-        else:
-            layer = spec.layer(selected)
-            if layer is not None:
-                st.markdown(f"**{layer.label}**")
-                _layer_controls(st, spec, layer)
+            if selected is None:
+                st.markdown("**Background photo**")
+                up = st.file_uploader("Upload custom photo", type=["jpg", "jpeg", "png", "webp"], key="bg_up")
+                if up is not None:
+                    spec.background.image = Image.open(up).convert("RGB")
+                if spec.background.image is not None:
+                    fc = st.columns(3)
+                    spec.background.focus_x = fc[0].slider("Focus X", 0.0, 1.0, spec.background.focus_x, 0.01)
+                    spec.background.focus_y = fc[1].slider("Focus Y", 0.0, 1.0, spec.background.focus_y, 0.01)
+                    spec.background.zoom = fc[2].slider("Zoom", 1.0, 2.0, spec.background.zoom, 0.05)
+                    if st.button("Remove photo"):
+                        spec.background.image = None
+                        st.rerun()
+                else:
+                    st.caption("No photo set — the template's flat background is used.")
+
+            elif selected == "__logo__":
+                st.markdown("**Logo**")
+                st.caption("A default placeholder logo is shown until you upload one.")
+                up = st.file_uploader("Replace logo (PNG, transparent background works best)",
+                                      type=["png", "jpg", "jpeg"], key="logo_up")
+                if up is not None:
+                    spec.logo.image = Image.open(up).convert("RGBA")
+                    spec.logo.is_default = False
+                if not spec.logo.is_default and st.button("Revert to default logo"):
+                    spec.logo.image = None
+                    spec.logo.is_default = True
+                    st.rerun()
+                lc = st.columns(3)
+                spec.logo.x = lc[0].slider("X", 0.0, 0.9, spec.logo.x, 0.01)
+                spec.logo.y = lc[1].slider("Y", 0.0, 0.9, spec.logo.y, 0.01)
+                spec.logo.w = lc[2].slider("Size", 0.04, 0.4, spec.logo.w, 0.01)
+                spec.logo.visible = st.checkbox("Visible", spec.logo.visible)
+
+            elif selected == "__contact__":
+                st.markdown("**Contact info**")
+                spec.contact.phone = st.text_input("Phone", spec.contact.phone)
+                spec.contact.show_phone = st.checkbox("Show phone", spec.contact.show_phone)
+                spec.contact.email = st.text_input("Email", spec.contact.email)
+                spec.contact.show_email = st.checkbox("Show email", spec.contact.show_email)
+                spec.contact.website = st.text_input("Website", spec.contact.website)
+                spec.contact.show_website = st.checkbox("Show website", spec.contact.show_website)
+                spec.contact.color = _color_picker(st, "Text colour", spec.contact.color, "contact_color")
+
+            else:
+                layer = spec.layer(selected)
+                if layer is not None:
+                    st.markdown(f"**{layer.label}**")
+                    _layer_controls(st, spec, layer)
 
     with right:
-        image = render(spec)
-        st.image(image, use_container_width=True)
-        buf = io.BytesIO()
-        image.save(buf, format="PNG")
-        st.download_button("Download PNG", buf.getvalue(),
-                           file_name=f"{spec.category}-{spec.template}.png", mime="image/png")
+        with st.container(border=True):
+            st.markdown("**Live preview**")
+            image = render(spec)
+            st.image(image, use_container_width=True)
+            buf = io.BytesIO()
+            image.save(buf, format="PNG")
+            st.download_button("⬇ Download PNG", buf.getvalue(),
+                               file_name=f"{spec.category}-{spec.template}.png", mime="image/png")
+
+
+def _sample_gallery_ui(st, spec: "PostSpec") -> None:
+    """The 'open a sample as an editable template' panel. Separated out of
+    post_studio_ui so the gallery's own state/errors can't take the rest of
+    the editor down with it."""
+    try:
+        sample_assets = get_sample_designs()
+    except Exception as exc:
+        st.error(f"Could not scan for sample designs: {exc}")
+        return
+
+    if not sample_assets:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        ref_dir = os.path.join(base_dir, "sample_design_references")
+        st.info(
+            "No sample designs found. This gallery looks for image/video files inside "
+            f"category subfolders of:\n\n`{ref_dir}`\n\n"
+            "Add e.g. `sample_design_references/Protection/example.webp` and reload the page. "
+            "In the meantime, use **Start from scratch** to build a post."
+        )
+        return
+
+    st.caption(
+        "Pick any sample design below and click **Open as Editable Template**. Only its "
+        "colour palette, layout and category are carried over — every element you then see "
+        "(headline, body, CTA, logo, contact info, background colour) is a real, independent "
+        "layer you can edit, move, restyle or delete, exactly like opening a template in Canva. "
+        "The sample image itself is shown only as read-only inspiration unless you tick the box "
+        "below to use it as your background photo."
+    )
+
+    categories_found = sorted({a["category"] for a in sample_assets})
+    sel_cat = st.selectbox("Filter by category", ["All"] + categories_found, key="ref_gallery_cat")
+
+    image_assets = [a for a in sample_assets if a["is_image"]]
+    video_assets = [a for a in sample_assets if a["is_video"]]
+    filtered_imgs = [a for a in image_assets if sel_cat == "All" or a["category"] == sel_cat]
+    filtered_vids = [a for a in video_assets if sel_cat == "All" or a["category"] == sel_cat]
+
+    if not filtered_imgs and not filtered_vids:
+        st.warning(f"No sample assets found for category '{sel_cat}'.")
+        return
+
+    if filtered_imgs:
+        st.markdown("**📸 Image templates**")
+        # NOTE: the widget key is scoped to the current category filter. Without
+        # this, switching the category shrinks the options list while the old
+        # selection index/value persists in session state, and Streamlit raises
+        # "value is not part of the options" — this was why the gallery broke.
+        chosen_img = st.selectbox(
+            "Select image template",
+            filtered_imgs,
+            format_func=lambda a: f"{a['category']} — {a['label']}",
+            key=f"ref_gallery_img_asset__{sel_cat}",
+        )
+
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            try:
+                st.image(
+                    chosen_img["path"],
+                    caption=f"Reference preview — {chosen_img['label']}",
+                    use_container_width=True,
+                )
+            except Exception as exc:
+                st.warning(f"Couldn't preview this file ({exc}). You can still open it as a template.")
+            st.caption(
+                "⬆ This is **inspiration only**, not a locked-in picture. Opening it builds a "
+                "fresh post from real layers — a flat, recolourable background panel, plus "
+                "independent Headline / Body / CTA / Logo / Contact layers you can edit freely "
+                "afterwards, the same as starting a blank draft."
+            )
+        with c2:
+            st.markdown(f"**Category:** {chosen_img['category']}")
+            st.divider()
+            st.markdown("**Customise before opening:**")
+            theme_choices = list(THEMES.keys())
+            default_theme_preset = CATEGORY_PRESETS.get(chosen_img["category"], {}).get("theme", "periwinkle")
+            default_theme_idx = theme_choices.index(default_theme_preset) if default_theme_preset in theme_choices else 0
+            chosen_theme = st.selectbox(
+                "Colour palette",
+                theme_choices,
+                index=default_theme_idx,
+                format_func=lambda k: THEMES[k].label,
+                key="gallery_theme_pick",
+            )
+            layout_choices = list(TEMPLATE_LABELS.keys())
+            card_layouts = [k for k in layout_choices if k != "banner"]
+            chosen_layout = st.selectbox(
+                "Layout (card always covers the text area)",
+                card_layouts,
+                format_func=lambda k: TEMPLATE_LABELS[k],
+                key="gallery_layout_pick",
+            )
+            use_ref_photo = st.checkbox(
+                "Also use this sample image as my background photo",
+                value=False,
+                # Scoped to the chosen file: switching samples always resets this to
+                # unticked, instead of silently carrying an earlier "yes" forward onto
+                # a template the person never meant it for.
+                key=f"gallery_use_ref_photo__{chosen_img['path']}",
+                help="Off by default so the template opens as flat, editable panels you can "
+                     "recolour freely. Turn this on only if you specifically want the sample's "
+                     "photo itself — you can still replace, crop or remove it afterwards.",
+            )
+            if use_ref_photo:
+                st.warning(
+                    "⚠️ These sample files are finished graphics, not plain photos — they already "
+                    "have their own headline, photos, logo and contact text baked in. Using one as "
+                    "your background will show fragments of that original design behind your new "
+                    "text wherever the card doesn't fully cover it. For a clean result, leave this "
+                    "unticked; the template's colours and layout still come through either way."
+                )
+            else:
+                st.caption(
+                    "The layout places a panel over part of the canvas for your text layers to sit on. "
+                    "Leave the box above unticked for a fully editable template; tick it to carry the "
+                    "sample's photo over as a starting background (still replaceable later)."
+                )
+            if st.button("✏️ Open as Editable Template", key="btn_open_editable_template", type="primary"):
+                try:
+                    st.session_state["spec"] = build_sample_template_spec(
+                        chosen_img,
+                        brand_name="LOGO",
+                        contact=spec.contact,
+                        theme_key=chosen_theme,
+                        template_key=chosen_layout,
+                        use_reference_image=use_ref_photo,
+                    )
+                except Exception as exc:
+                    st.error(f"Could not open this template: {exc}")
+                else:
+                    st.rerun()
+
+    if filtered_vids:
+        st.divider()
+        st.markdown("**🎬 Video references** *(view only — use as inspiration)*")
+        chosen_vid = st.selectbox(
+            "Select video reference",
+            filtered_vids,
+            format_func=lambda a: f"{a['category']} — {a['label']}",
+            key=f"ref_gallery_vid_asset__{sel_cat}",
+        )
+        try:
+            st.video(chosen_vid["path"])
+        except Exception as exc:
+            st.warning(f"Couldn't play this file ({exc}).")
+        st.caption(f"{chosen_vid['category']}: {chosen_vid['label']}")
 
 
 if __name__ == "__main__":
