@@ -19,9 +19,224 @@ from fca_monitor import (
 )
 from generator import generate_posts
 
-st.set_page_config(page_title="FCA Compliant Marketing Generator", layout="wide")
+st.set_page_config(
+    page_title="FCA Compliant Marketing Generator",
+    page_icon="🛡️",
+    layout="wide",
+)
 
 active_model = OLLAMA_MODEL if AI_PROVIDER == "ollama" else GEMINI_MODEL
+
+
+def _inject_theme():
+    st.markdown(
+        """
+        <style>
+        :root {
+            --navy-900: #0f1f33;
+            --navy-800: #16283f;
+            --navy-700: #1e3a5f;
+            --blue-600: #2563eb;
+            --blue-50:  #eef4ff;
+            --slate-900: #1e2a3a;
+            --slate-600: #52657a;
+            --slate-400: #8a9bb0;
+            --slate-200: #e3e9f0;
+            --slate-100: #eef2f7;
+            --card-bg: #ffffff;
+            --green-600: #15803d;
+            --green-50: #eafaf0;
+            --amber-600: #b45309;
+            --amber-50: #fff7e6;
+        }
+
+        html, body, [class*="css"]  {
+            font-family: "Inter", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+
+        .stApp {
+            background: linear-gradient(180deg, #f4f7fb 0%, #f7f9fc 260px, #f7f9fc 100%);
+        }
+
+        /* ---- Top banner ---- */
+        .app-banner {
+            background: linear-gradient(120deg, var(--navy-900) 0%, var(--navy-700) 100%);
+            border-radius: 14px;
+            padding: 28px 34px;
+            margin-bottom: 22px;
+            box-shadow: 0 8px 24px rgba(15, 31, 51, 0.18);
+        }
+        .app-banner h1 {
+            color: #ffffff;
+            font-size: 1.65rem;
+            font-weight: 700;
+            margin: 0 0 6px 0;
+            letter-spacing: 0.2px;
+        }
+        .app-banner p {
+            color: #c7d4e6;
+            font-size: 0.95rem;
+            margin: 0;
+            max-width: 780px;
+            line-height: 1.5;
+        }
+        .app-banner .tag {
+            display: inline-block;
+            background: rgba(255,255,255,0.12);
+            color: #dce8fb;
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.6px;
+            text-transform: uppercase;
+            padding: 4px 10px;
+            border-radius: 999px;
+            margin-bottom: 12px;
+        }
+
+        /* ---- Notice / info card ---- */
+        .notice-card {
+            background: var(--amber-50);
+            border: 1px solid #f3d9a8;
+            border-left: 4px solid var(--amber-600);
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin-bottom: 22px;
+            color: #6b4a12;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+
+        /* ---- Sidebar ---- */
+        section[data-testid="stSidebar"] {
+            background: var(--navy-900);
+        }
+        section[data-testid="stSidebar"] * {
+            color: #dce8fb !important;
+        }
+        section[data-testid="stSidebar"] .stCaption, 
+        section[data-testid="stSidebar"] p {
+            color: #aebedb !important;
+        }
+        section[data-testid="stSidebar"] h3 {
+            color: #ffffff !important;
+            font-weight: 700;
+            border-bottom: 1px solid rgba(255,255,255,0.12);
+            padding-bottom: 8px;
+        }
+
+        /* ---- Tabs ---- */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 4px;
+            border-bottom: 1px solid var(--slate-200);
+        }
+        .stTabs [data-baseweb="tab"] {
+            height: 42px;
+            border-radius: 8px 8px 0 0;
+            padding: 0 18px;
+            background-color: transparent;
+            color: var(--slate-600);
+            font-weight: 600;
+            font-size: 0.92rem;
+        }
+        .stTabs [aria-selected="true"] {
+            background-color: var(--blue-50) !important;
+            color: var(--blue-600) !important;
+            box-shadow: inset 0 -2px 0 var(--blue-600);
+        }
+
+        /* ---- Section headers ---- */
+        h2, h3 {
+            color: var(--navy-900);
+            font-weight: 700;
+        }
+
+        /* ---- Buttons ---- */
+        .stButton > button {
+            border-radius: 8px;
+            font-weight: 600;
+            border: 1px solid var(--slate-200);
+            padding: 0.5rem 1.2rem;
+            transition: all 0.15s ease;
+        }
+        .stButton > button[kind="primary"] {
+            background: var(--blue-600);
+            border: 1px solid var(--blue-600);
+            box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25);
+        }
+        .stButton > button[kind="primary"]:hover {
+            background: #1d4fd1;
+            border-color: #1d4fd1;
+        }
+        .stButton > button:hover {
+            border-color: var(--blue-600);
+            color: var(--blue-600);
+        }
+
+        /* ---- Inputs ---- */
+        .stTextInput input, .stTextArea textarea, .stNumberInput input, 
+        div[data-baseweb="select"] > div {
+            border-radius: 8px !important;
+            border-color: var(--slate-200) !important;
+        }
+
+        /* ---- Expanders (history / flagged cards) ---- */
+        details {
+            background: var(--card-bg);
+            border: 1px solid var(--slate-200);
+            border-radius: 10px;
+            margin-bottom: 10px;
+            padding: 2px 6px;
+            box-shadow: 0 1px 3px rgba(15, 31, 51, 0.04);
+        }
+        summary {
+            font-weight: 600;
+            color: var(--navy-800);
+        }
+
+        /* ---- Status pills ---- */
+        .pill {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 999px;
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+        }
+        .pill-active {
+            background: var(--green-50);
+            color: var(--green-600);
+            border: 1px solid #bfe8cf;
+        }
+        .pill-flagged {
+            background: var(--amber-50);
+            color: var(--amber-600);
+            border: 1px solid #f3d9a8;
+        }
+
+        /* ---- Generated post cards ---- */
+        .post-label {
+            font-weight: 700;
+            color: var(--navy-800);
+            margin-top: 10px;
+            margin-bottom: 2px;
+            font-size: 0.95rem;
+        }
+
+        .stTextArea textarea {
+            background: var(--slate-100);
+        }
+
+        hr, .stDivider {
+            border-color: var(--slate-200) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+_inject_theme()
 
 
 def _coerce_json_list(value):
@@ -53,22 +268,32 @@ except RuntimeError as exc:
     st.error(str(exc))
     st.stop()
 
-st.title("FCA-Compliant Marketing Text Generator")
-st.caption(
-    "Generates UK financial-promotion marketing text for advisers, grounded in the FCA "
-    "Handbook, and logs every generation so affected posts can be flagged if the underlying "
-    "FCA content later changes."
+st.markdown(
+    """
+    <div class="app-banner">
+        <span class="tag">Regulated financial promotions</span>
+        <h1>🛡️ FCA-Compliant Marketing Text Generator</h1>
+        <p>Generates UK financial-promotion marketing text for advisers, grounded in the FCA
+        Handbook, and logs every generation so affected posts can be flagged if the underlying
+        FCA content later changes.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
-st.info(
-    "This tool assists drafting only. All generated text should still be reviewed and "
-    "signed off by your firm's compliance function before use, in line with your usual "
-    "financial promotion approval process.",
-    icon="⚠️",
+st.markdown(
+    """
+    <div class="notice-card">
+        ⚠️&nbsp; <strong>This tool assists drafting only.</strong> All generated text should
+        still be reviewed and signed off by your firm's compliance function before use, in
+        line with your usual financial promotion approval process.
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
 with st.sidebar:
-    st.subheader("AI configuration")
-    st.caption(f"Provider: {AI_PROVIDER.title()}")
+    st.subheader("⚙️ AI configuration")
+    st.caption(f"Provider: **{AI_PROVIDER.title()}**")
     st.caption(f"Model: `{active_model}`")
     if AI_PROVIDER == "ollama":
         st.caption("Using the local Ollama service at http://localhost:11434")
@@ -163,9 +388,12 @@ with tab_generate:
                         (batch_id, i + 1, text),
                     )
 
-                st.success(f"Generated {len(posts)} post(s) — Batch ID {batch_id}")
+                st.success(f"✅ Generated {len(posts)} post(s) — Batch ID {batch_id}")
                 for i, text in enumerate(posts):
-                    st.markdown(f"**Post {i + 1}**")
+                    st.markdown(
+                        f'<div class="post-label">Post {i + 1}</div>',
+                        unsafe_allow_html=True,
+                    )
                     st.text_area(
                         f"post_{batch_id}_{i + 1}",
                         value=text,
@@ -190,12 +418,18 @@ with tab_history:
     if not rows:
         st.info("No posts generated yet.")
     for r in rows:
-        status_badge = "⚠️ FLAGGED FOR REVIEW" if r["status"] == "flagged_for_review" else "✅ active"
+        is_flagged = r["status"] == "flagged_for_review"
+        pill_class = "pill-flagged" if is_flagged else "pill-active"
+        pill_text = "⚠ Flagged for review" if is_flagged else "✓ Active"
         header = (
             f"[{r['created_at']}] Batch {r['batch_id']} / Post {r['post_id']} — "
-            f"{r['category']} ({r['format_type']}) — {status_badge}"
+            f"{r['category']} ({r['format_type']})"
         )
         with st.expander(header):
+            st.markdown(
+                f'<span class="pill {pill_class}">{pill_text}</span>',
+                unsafe_allow_html=True,
+            )
             st.write(f"Guideline: {r['guideline'] or '(none)'}")
             used_clauses = _coerce_json_list(r["used_clauses"])
             if used_clauses:
@@ -228,11 +462,12 @@ with tab_monitor:
         st.info("Sections not seeded yet.")
     else:
         for s in sections:
-            st.write(f"**{s['section_name']}** — [{s['url']}]({s['url']})")
-            st.caption(
-                f"Last checked: {s['last_checked'] or 'never'} · "
-                f"Last changed: {s['last_changed'] or 'never'}"
-            )
+            with st.container(border=True):
+                st.write(f"**{s['section_name']}** — [{s['url']}]({s['url']})")
+                st.caption(
+                    f"Last checked: {s['last_checked'] or 'never'} · "
+                    f"Last changed: {s['last_changed'] or 'never'}"
+                )
 
     st.divider()
     st.write(
@@ -287,6 +522,10 @@ with tab_flagged:
     for f in flagged:
         header = f"Post {f['post_id']} — {f['category']} ({f['format_type']}) — flagged {f['flagged_at']}"
         with st.expander(header):
+            st.markdown(
+                '<span class="pill pill-flagged">⚠ Flagged for review</span>',
+                unsafe_allow_html=True,
+            )
             st.write(f"Reason: change detected in **{f['section_name']}** ({f['url']})")
             st.write("Original text:")
             st.write(f["post_text"])
