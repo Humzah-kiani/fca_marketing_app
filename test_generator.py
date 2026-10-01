@@ -10,6 +10,7 @@ from generator import (
     _build_user_prompt,
     _dedupe_posts,
     _generate_with_gemini,
+    _is_transient_gemini_error,
 )
 from post_studio import build_post_canvas
 
@@ -86,6 +87,12 @@ def test_generate_with_gemini_tries_fallback_model_on_404_or_503(monkeypatch):
 
     assert result == ["Fallback post"]
     assert calls == ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+
+
+def test_invalid_gemini_api_key_is_not_transient():
+    error = RuntimeError("400 INVALID_ARGUMENT: API_KEY_INVALID: API key not valid")
+
+    assert not _is_transient_gemini_error(error)
 
 
 def test_normalise_gemini_model_preserves_explicit_model_selection():

@@ -335,6 +335,8 @@ def _gemini_model_candidates(client) -> list[str]:
 
 def _is_transient_gemini_error(exc: Exception) -> bool:
     message = str(exc).lower()
+    if "api_key_invalid" in message or "api key not valid" in message:
+        return False
     return any(
         token in message
         for token in [
