@@ -1189,14 +1189,18 @@ def post_studio_ui() -> None:
 
     import streamlit as st
 
+    try:
+        from streamlit_image_coordinates import streamlit_image_coordinates as _img_coords
+    except ImportError:
+        _img_coords = None
+
     _inject_studio_theme(st)
 
     st.markdown(
         """
         <div class="ps-header">
             <h2>🖌️ Post studio</h2>
-            <p>Build a branded social post from a sample template or a blank draft, then fine-tune
-            every headline, image and colour as its own independent, editable layer.</p>
+            <p>Start from a sample or a blank draft, then edit every headline, image and colour directly.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1259,12 +1263,7 @@ def post_studio_ui() -> None:
     with left:
         with st.container(border=True):
             with st.expander("🎨 Template style — palette & layout", expanded=False):
-                st.caption(
-                    "Change these any time, on any post — whether it was started blank, generated "
-                    "from a brief, or opened from a sample. The panels, peek slabs and card recolour "
-                    "instantly; your text, logo and contact layers keep their content and simply "
-                    "re-render on top."
-                )
+                st.caption("Change any time — your text, logo and contact layers stay as they are.")
                 theme_choices = list(THEMES.keys())
                 new_theme = st.selectbox(
                     "Colour palette", theme_choices,
@@ -1354,7 +1353,35 @@ def post_studio_ui() -> None:
         with st.container(border=True):
             st.markdown("**Live preview**")
             image = render(spec)
-            st.image(image, use_container_width=True)
+
+            positionable = None  # the thing a canvas click should move, if anything
+            if selected == "__logo__":
+                positionable = spec.logo
+            elif selected not in (None, "__contact__"):
+                positionable = spec.layer(selected)
+
+            if _img_coords is not None and positionable is not None:
+                st.caption("📍 Click anywhere on the image to move the selected layer there.")
+                click = _img_coords(image, key=f"canvas_click_{selected}")
+                if click is not None:
+                    last_key = f"_last_canvas_click_{selected}"
+                    current = (click["x"], click["y"])
+                    if st.session_state.get(last_key) != current:
+                        st.session_state[last_key] = current
+                        max_x = 0.9 if isinstance(positionable, ImageLayer) else 0.95
+                        max_y = max_x
+                        positionable.x = max(0.0, min(max_x, click["x"] / image.width))
+                        positionable.y = max(0.0, min(max_y, click["y"] / image.height))
+                        st.rerun()
+            else:
+                st.image(image, use_container_width=True)
+                if positionable is not None and _img_coords is None:
+                    st.caption(
+                        "💡 `pip install streamlit-image-coordinates` to click directly on the "
+                        "image and reposition the selected layer there, instead of only the "
+                        "X/Y sliders below."
+                    )
+
             buf = io.BytesIO()
             image.save(buf, format="PNG")
             st.download_button("⬇ Download PNG", buf.getvalue(),
@@ -1375,111 +1402,75 @@ def _sample_gallery_ui(st, spec: "PostSpec") -> None:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         ref_dir = os.path.join(base_dir, "sample_design_references")
         st.info(
-            "No sample designs found. This gallery looks for image/video files inside "
-            f"category subfolders of:\n\n`{ref_dir}`\n\n"
+            "No sample templates found. This gallery looks for image files inside category "
+            f"subfolders of:\n\n`{ref_dir}`\n\n"
             "Add e.g. `sample_design_references/Protection/example.webp` and reload the page. "
             "In the meantime, use **Start from scratch** to build a post."
         )
         return
 
-    st.caption(
-        "Pick any sample design below and click **Open as Editable Template**. Only its "
-        "colour palette, layout and category are carried over — every element you then see "
-        "(headline, body, CTA, logo, contact info, background colour) is a real, independent "
-        "layer you can edit, move, restyle or delete, exactly like opening a template in Canva. "
-        "The sample image itself is shown only as read-only inspiration unless you tick the box "
-        "below to use it as your background photo."
-    )
+    st.caption("Pick a sample, then open it as a fully editable, blank-panel template.")
 
     categories_found = sorted({a["category"] for a in sample_assets})
-    sel_cat = st.selectbox("Filter by category", ["All"] + categories_found, key="ref_gallery_cat")
-
     image_assets = [a for a in sample_assets if a["is_image"]]
-    video_assets = [a for a in sample_assets if a["is_video"]]
-    filtered_imgs = [a for a in image_assets if sel_cat == "All" or a["category"] == sel_cat]
-    filtered_vids = [a for a in video_assets if sel_cat == "All" or a["category"] == sel_cat]
 
-    if not filtered_imgs and not filtered_vids:
-        st.warning(f"No sample assets found for category '{sel_cat}'.")
+    fcol, pcol = st.columns([1, 2])
+    sel_cat = fcol.selectbox("Category", ["All"] + categories_found, key="ref_gallery_cat")
+    filtered_imgs = [a for a in image_assets if sel_cat == "All" or a["category"] == sel_cat]
+
+    if not filtered_imgs:
+        st.warning(f"No sample templates found for category '{sel_cat}'.")
         return
 
-    if filtered_imgs:
-        st.markdown("**📸 Image templates**")
-        # NOTE: the widget key is scoped to the current category filter. Without
-        # this, switching the category shrinks the options list while the old
-        # selection index/value persists in session state, and Streamlit raises
-        # "value is not part of the options" — this was why the gallery broke.
-        chosen_img = st.selectbox(
-            "Select image template",
-            filtered_imgs,
-            format_func=lambda a: f"{a['category']} — {a['label']}",
-            key=f"ref_gallery_img_asset__{sel_cat}",
-        )
+    # NOTE: the widget key is scoped to the current category filter. Without
+    # this, switching the category shrinks the options list while the old
+    # selection index/value persists in session state, and Streamlit raises
+    # "value is not part of the options" — this was why the gallery broke.
+    chosen_img = pcol.selectbox(
+        "Template",
+        filtered_imgs,
+        format_func=lambda a: a["label"],
+        key=f"ref_gallery_img_asset__{sel_cat}",
+    )
 
-        c1, c2 = st.columns([3, 2])
+    with st.container(border=True):
+        c1, c2 = st.columns([3, 2], gap="medium")
         with c1:
             try:
-                st.image(
-                    chosen_img["path"],
-                    caption=f"Reference preview — {chosen_img['label']}",
-                    use_container_width=True,
-                )
+                st.image(chosen_img["path"], use_container_width=True)
             except Exception as exc:
                 st.warning(f"Couldn't preview this file ({exc}). You can still open it as a template.")
-            st.caption(
-                "⬆ This is **inspiration only**, not a locked-in picture. Opening it builds a "
-                "fresh post from real layers — a flat, recolourable background panel, plus "
-                "independent Headline / Body / CTA / Logo / Contact layers you can edit freely "
-                "afterwards, the same as starting a blank draft."
-            )
+            st.caption("Inspiration only — opening it builds a fresh, fully editable post.")
+
         with c2:
-            st.markdown(f"**Category:** {chosen_img['category']}")
-            st.divider()
-            st.markdown("**Customise before opening:**")
             theme_choices = list(THEMES.keys())
             default_theme_preset = CATEGORY_PRESETS.get(chosen_img["category"], {}).get("theme", "periwinkle")
             default_theme_idx = theme_choices.index(default_theme_preset) if default_theme_preset in theme_choices else 0
             chosen_theme = st.selectbox(
-                "Colour palette",
-                theme_choices,
-                index=default_theme_idx,
-                format_func=lambda k: THEMES[k].label,
-                key="gallery_theme_pick",
+                "Colour palette", theme_choices, index=default_theme_idx,
+                format_func=lambda k: THEMES[k].label, key="gallery_theme_pick",
             )
             layout_choices = list(TEMPLATE_LABELS.keys())
             card_layouts = [k for k in layout_choices if k != "banner"]
             chosen_layout = st.selectbox(
-                "Layout (card always covers the text area)",
-                card_layouts,
-                format_func=lambda k: TEMPLATE_LABELS[k],
-                key="gallery_layout_pick",
+                "Layout", card_layouts,
+                format_func=lambda k: TEMPLATE_LABELS[k], key="gallery_layout_pick",
             )
             use_ref_photo = st.checkbox(
-                "Also use this sample image as my background photo",
+                "Use sample image as background photo",
                 value=False,
                 # Scoped to the chosen file: switching samples always resets this to
                 # unticked, instead of silently carrying an earlier "yes" forward onto
                 # a template the person never meant it for.
                 key=f"gallery_use_ref_photo__{chosen_img['path']}",
-                help="Off by default so the template opens as flat, editable panels you can "
-                     "recolour freely. Turn this on only if you specifically want the sample's "
-                     "photo itself — you can still replace, crop or remove it afterwards.",
+                help="These sample files are finished graphics with their own text baked in, "
+                     "not plain photos — leave unticked for a clean, fully editable result.",
             )
             if use_ref_photo:
-                st.warning(
-                    "⚠️ These sample files are finished graphics, not plain photos — they already "
-                    "have their own headline, photos, logo and contact text baked in. Using one as "
-                    "your background will show fragments of that original design behind your new "
-                    "text wherever the card doesn't fully cover it. For a clean result, leave this "
-                    "unticked; the template's colours and layout still come through either way."
-                )
-            else:
-                st.caption(
-                    "The layout places a panel over part of the canvas for your text layers to sit on. "
-                    "Leave the box above unticked for a fully editable template; tick it to carry the "
-                    "sample's photo over as a starting background (still replaceable later)."
-                )
-            if st.button("✏️ Open as Editable Template", key="btn_open_editable_template", type="primary"):
+                st.caption("⚠️ The sample's own text/photos may show through your card edges.")
+
+            if st.button("✏️ Open as Editable Template", key="btn_open_editable_template", type="primary",
+                        use_container_width=True):
                 try:
                     st.session_state["spec"] = build_sample_template_spec(
                         chosen_img,
@@ -1493,21 +1484,6 @@ def _sample_gallery_ui(st, spec: "PostSpec") -> None:
                     st.error(f"Could not open this template: {exc}")
                 else:
                     st.rerun()
-
-    if filtered_vids:
-        st.divider()
-        st.markdown("**🎬 Video references** *(view only — use as inspiration)*")
-        chosen_vid = st.selectbox(
-            "Select video reference",
-            filtered_vids,
-            format_func=lambda a: f"{a['category']} — {a['label']}",
-            key=f"ref_gallery_vid_asset__{sel_cat}",
-        )
-        try:
-            st.video(chosen_vid["path"])
-        except Exception as exc:
-            st.warning(f"Couldn't play this file ({exc}).")
-        st.caption(f"{chosen_vid['category']}: {chosen_vid['label']}")
 
 
 if __name__ == "__main__":
