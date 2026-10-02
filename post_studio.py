@@ -2,47 +2,28 @@
 post_studio.py
 ==============
 
-A social-post generator AND editor, built entirely on Pillow + Streamlit —
-no JS canvas, no external components. It works because the whole "editor"
-is just: hold the post as a list of independent layers, let Streamlit
-widgets edit whichever layer is selected, and re-render the flat PNG with
-Pillow on every rerun (which is Streamlit's normal behaviour anyway).
-
-Layers
-------
-  TextLayer       one block of text: content, font family, size, colour,
-                   bold, italic, underline, highlight, alignment, position
-  ImageLayer      the logo: replaceable, position + size. A default logo
-                   is generated procedurally if none is supplied.
-  BackgroundLayer the post photo: replaceable, with focus/zoom controls
-  ContactInfo     phone, email, website — each its own visible/editable line
-
-A PostSpec bundles these plus a *template* (from the client's sample set)
-that paints the non-text scaffolding — the flat colour field, the solid
-card, the offset "peek" slabs — behind the layers. Choosing a template only
-sets sensible starting positions/colours for the layers it creates; every
-layer is independently editable afterwards, including moving it onto a
-completely different part of the canvas.
-
-Public API
-----------
-    new_post(...)      -> PostSpec   (build a first draft from a brief)
-    render(spec)        -> PIL.Image  (flatten all layers to one image)
-    default_logo(...)   -> PIL.Image  (procedural placeholder logo)
-    build_post_canvas(...) -> PIL.Image   (old call signature, still works)
-    post_studio_ui()    -> a complete Streamlit editor page
+A social-post, carousel, and short reel generator/editor built on Pillow, Streamlit, and ImageIO.
+All template graphics are fully customizable vector shapes—no static non-editable PNG templates.
 """
 
 from __future__ import annotations
 
+import io
 import math
 import os
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Callable, Sequence
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+try:
+    import imageio
+    HAS_IMAGEIO = True
+except ImportError:
+    HAS_IMAGEIO = False
 
 RGB = tuple[int, int, int]
 RGBA = tuple[int, int, int, int]
@@ -50,20 +31,17 @@ Box = tuple[float, float, float, float]
 
 __all__ = [
     "Palette", "TextStyle", "TextLayer", "ImageLayer", "BackgroundLayer",
-    "ContactInfo", "PostSpec",
+    "ContactInfo", "PostSpec", "SlideSpec", "CarouselSpec",
     "THEMES", "FORMATS", "TEMPLATES", "TEMPLATE_LABELS", "CATEGORY_PRESETS",
-    "FONT_FAMILIES",
-    "new_post", "render", "default_logo", "build_post_canvas",
-    "missing_fonts", "post_studio_ui", "get_sample_designs",
+    "FONT_FAMILIES", "new_post", "render", "default_logo", "build_post_canvas", "post_studio_ui",
+    "render_carousel", "export_reel_video"
 ]
 
-
 # ---------------------------------------------------------------------------
-# Palettes (lifted from the client's sample posts) + formats
+# Dynamic Custom Color Palettes & Custom Schemes
 # ---------------------------------------------------------------------------
 
-
-@dataclass(frozen=True)
+@dataclass
 class Palette:
     key: str
     label: str
@@ -78,56 +56,44 @@ class Palette:
     pale: RGB
     pale_ink: RGB
 
-
 THEMES: dict[str, Palette] = {
-    "periwinkle": Palette("periwinkle", "Periwinkle / charcoal",
+    "periwinkle": Palette("periwinkle", "Periwinkle / Charcoal",
         bg=(107, 111, 196), card=(62, 59, 74), peek=(198, 194, 250),
         ink=(255, 255, 255), ink_muted=(216, 214, 224), on_bg=(255, 255, 255),
         cta_bg=(198, 194, 250), cta_ink=(48, 45, 60),
         pale=(238, 236, 252), pale_ink=(46, 44, 58)),
-    "royal": Palette("royal", "Royal blue / mint",
+    "royal": Palette("royal", "Royal Blue / Mint",
         bg=(16, 70, 139), card=(126, 227, 152), peek=(138, 224, 246),
         ink=(12, 26, 20), ink_muted=(38, 66, 50), on_bg=(255, 255, 255),
         cta_bg=(12, 38, 72), cta_ink=(255, 255, 255),
         pale=(240, 250, 243), pale_ink=(14, 40, 26)),
-    "plum": Palette("plum", "Plum / coral",
+    "plum": Palette("plum", "Plum / Coral",
         bg=(122, 87, 118), card=(232, 131, 107), peek=(214, 210, 208),
         ink=(255, 255, 255), ink_muted=(252, 232, 226), on_bg=(255, 255, 255),
         cta_bg=(255, 255, 255), cta_ink=(154, 72, 52),
         pale=(250, 236, 230), pale_ink=(96, 46, 34)),
-    "maroon": Palette("maroon", "Maroon / forest",
-        bg=(126, 26, 26), card=(31, 107, 87), peek=(247, 235, 200),
-        ink=(255, 255, 255), ink_muted=(216, 232, 226), on_bg=(255, 255, 255),
-        cta_bg=(247, 235, 200), cta_ink=(31, 70, 58),
-        pale=(247, 235, 200), pale_ink=(58, 26, 22)),
-    "mustard": Palette("mustard", "Charcoal / mustard",
+    "mustard": Palette("mustard", "Charcoal / Mustard",
         bg=(34, 34, 40), card=(242, 194, 48), peek=(88, 58, 138),
         ink=(28, 26, 22), ink_muted=(74, 66, 40), on_bg=(255, 255, 255),
         cta_bg=(28, 26, 22), cta_ink=(242, 194, 48),
         pale=(250, 240, 210), pale_ink=(34, 32, 28)),
-    "ivory": Palette("ivory", "Navy / ivory",
-        bg=(20, 40, 72), card=(248, 243, 233), peek=(196, 140, 92),
-        ink=(22, 28, 38), ink_muted=(84, 92, 104), on_bg=(255, 255, 255),
-        cta_bg=(20, 40, 72), cta_ink=(255, 255, 255),
-        pale=(248, 243, 233), pale_ink=(22, 28, 38)),
-    "brick": Palette("brick", "Brick / deep navy",
-        bg=(178, 58, 46), card=(30, 58, 95), peek=(246, 219, 210),
-        ink=(255, 255, 255), ink_muted=(212, 222, 236), on_bg=(255, 255, 255),
-        cta_bg=(246, 219, 210), cta_ink=(30, 58, 95),
-        pale=(246, 219, 210), pale_ink=(64, 26, 20)),
-    "sage": Palette("sage", "Slate / sage",
-        bg=(74, 90, 92), card=(150, 182, 165), peek=(238, 240, 232),
-        ink=(20, 32, 30), ink_muted=(52, 70, 64), on_bg=(255, 255, 255),
-        cta_bg=(28, 44, 42), cta_ink=(255, 255, 255),
-        pale=(238, 240, 232), pale_ink=(24, 38, 34)),
+    "emerald": Palette("emerald", "Emerald / Soft Gold",
+        bg=(18, 53, 36), card=(240, 235, 210), peek=(52, 114, 83),
+        ink=(18, 40, 28), ink_muted=(70, 90, 78), on_bg=(255, 255, 255),
+        cta_bg=(18, 53, 36), cta_ink=(240, 235, 210),
+        pale=(240, 245, 242), pale_ink=(18, 53, 36)),
+    "custom": Palette("custom", "Custom Palette",
+        bg=(25, 25, 30), card=(45, 45, 55), peek=(255, 105, 180),
+        ink=(255, 255, 255), ink_muted=(200, 200, 210), on_bg=(255, 255, 255),
+        cta_bg=(255, 105, 180), cta_ink=(255, 255, 255),
+        pale=(240, 240, 245), pale_ink=(20, 20, 30))
 }
 
 CATEGORY_PRESETS: dict[str, dict[str, str]] = {
     "Protection": {"theme": "periwinkle", "template": "offset_card"},
     "Retirement": {"theme": "royal", "template": "card_photo"},
-    "Pension": {"theme": "sage", "template": "photo_side"},
-    "Mortgage": {"theme": "brick", "template": "banner"},
-    "Investment and Estate Planning": {"theme": "ivory", "template": "circle_photo"},
+    "Pension": {"theme": "emerald", "template": "photo_side"},
+    "Mortgage": {"theme": "plum", "template": "banner"},
     "Lifestyle": {"theme": "mustard", "template": "arc"},
 }
 
@@ -135,16 +101,9 @@ FORMATS: dict[str, tuple[int, int]] = {
     "square": (1080, 1080),
     "portrait": (1080, 1350),
     "story": (1080, 1920),
+    "reel": (1080, 1920),
     "landscape": (1200, 628),
 }
-
-
-# ---------------------------------------------------------------------------
-# Fonts — three families, each with real regular/bold/italic/bold-italic
-# files where installed, and a guaranteed fallback (synthetic bold via
-# stroke, synthetic italic via shear) so styling never silently no-ops.
-# ---------------------------------------------------------------------------
-
 
 FONT_FAMILIES: dict[str, str] = {
     "display": "Poppins (sans)",
@@ -153,41 +112,20 @@ FONT_FAMILIES: dict[str, str] = {
 }
 
 _FONT_STACKS: dict[tuple[str, str], Sequence[str]] = {
-    ("display", "regular"): ("Poppins-Regular", "Inter-Regular", "Carlito-Regular",
-                              "LiberationSans-Regular", "DejaVuSans", "arial"),
-    ("display", "bold"): ("Poppins-Bold", "Poppins-SemiBold", "Inter-Bold",
-                           "Carlito-Bold", "LiberationSans-Bold", "DejaVuSans-Bold", "arialbd"),
-    ("display", "italic"): ("Poppins-Italic", "Inter-Italic", "Carlito-Italic",
-                             "LiberationSans-Italic", "DejaVuSans-Oblique", "ariali"),
-    ("display", "bold_italic"): ("Poppins-BoldItalic", "Inter-BoldItalic", "Carlito-BoldItalic",
-                                  "LiberationSans-BoldItalic", "DejaVuSans-BoldOblique", "arialbi"),
-    ("serif", "regular"): ("Lora-Regular", "Lora-Variable", "PlayfairDisplay-Regular",
-                            "DejaVuSerif", "LiberationSerif-Regular", "georgia"),
-    ("serif", "bold"): ("Lora-Bold", "Lora-Variable", "PlayfairDisplay-Bold",
-                         "DejaVuSerif-Bold", "LiberationSerif-Bold", "georgiab"),
-    ("serif", "italic"): ("Lora-Italic", "Lora-Italic-Variable", "PlayfairDisplay-Italic",
-                           "DejaVuSerif-Italic", "LiberationSerif-Italic", "georgiai"),
-    ("serif", "bold_italic"): ("Lora-BoldItalic", "Lora-Italic-Variable", "PlayfairDisplay-BoldItalic",
-                                "DejaVuSerif-BoldItalic", "LiberationSerif-BoldItalic", "georgiaz"),
-    ("body", "regular"): ("Inter-Regular", "Carlito-Regular", "LiberationSans-Regular",
-                           "DejaVuSans", "FreeSans", "arial"),
-    ("body", "bold"): ("Inter-Bold", "Carlito-Bold", "LiberationSans-Bold",
-                        "DejaVuSans-Bold", "FreeSansBold", "arialbd"),
-    ("body", "italic"): ("Inter-Italic", "Carlito-Italic", "LiberationSans-Italic",
-                          "DejaVuSans-Oblique", "ariali"),
-    ("body", "bold_italic"): ("Inter-BoldItalic", "Carlito-BoldItalic", "LiberationSans-BoldItalic",
-                               "DejaVuSans-BoldOblique", "arialbi"),
+    ("display", "regular"): ("Poppins-Regular", "Inter-Regular", "LiberationSans-Regular", "DejaVuSans", "arial"),
+    ("display", "bold"): ("Poppins-Bold", "Inter-Bold", "LiberationSans-Bold", "DejaVuSans-Bold", "arialbd"),
+    ("display", "italic"): ("Poppins-Italic", "Inter-Italic", "LiberationSans-Italic", "DejaVuSans-Oblique", "ariali"),
+    ("serif", "regular"): ("Lora-Regular", "PlayfairDisplay-Regular", "DejaVuSerif", "georgia"),
+    ("serif", "bold"): ("Lora-Bold", "PlayfairDisplay-Bold", "DejaVuSerif-Bold", "georgiab"),
+    ("body", "regular"): ("Inter-Regular", "LiberationSans-Regular", "DejaVuSans", "arial"),
+    ("body", "bold"): ("Inter-Bold", "LiberationSans-Bold", "DejaVuSans-Bold", "arialbd"),
 }
 
 FONT_DIRS = (
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts"),
-    "/usr/share/fonts", "/usr/local/share/fonts",
-    os.path.expanduser("~/.fonts"), os.path.expanduser("~/.local/share/fonts"),
-    "/Library/Fonts", "/System/Library/Fonts", os.path.expanduser("~/Library/Fonts"),
-    "C:/Windows/Fonts",
+    "/usr/share/fonts", "/usr/local/share/fonts", "/Library/Fonts", "C:/Windows/Fonts"
 )
-
 
 @lru_cache(maxsize=1)
 def _font_index() -> dict[str, str]:
@@ -195,13 +133,12 @@ def _font_index() -> dict[str, str]:
     for root in FONT_DIRS:
         if not os.path.isdir(root):
             continue
-        for dirpath, _dirs, files in os.walk(root):
+        for dirpath, _, files in os.walk(root):
             for name in files:
                 stem, ext = os.path.splitext(name)
                 if ext.lower() in (".ttf", ".otf"):
                     index.setdefault(stem.lower(), os.path.join(dirpath, name))
     return index
-
 
 @lru_cache(maxsize=64)
 def _resolve(family: str, weight: str) -> str | None:
@@ -210,43 +147,7 @@ def _resolve(family: str, weight: str) -> str | None:
         hit = index.get(cand.lower())
         if hit:
             return hit
-    for cand in _FONT_STACKS.get((family, weight), ()):
-        needle = cand.lower().replace("-", "")
-        for stem, path in index.items():
-            if needle in stem.replace("-", ""):
-                return path
     return None
-
-
-@dataclass(frozen=True)
-class _Resolved:
-    path: str | None
-    synthetic_bold: bool
-    synthetic_italic: bool
-
-
-def _resolve_style(family: str, bold: bool, italic: bool) -> _Resolved:
-    """Real file for this exact weight/slant if one exists; otherwise fall
-    back to the nearest real file and flag what still needs to be faked."""
-    if bold and italic:
-        path = _resolve(family, "bold_italic")
-        if path:
-            return _Resolved(path, False, False)
-        path = _resolve(family, "bold")
-        if path:
-            return _Resolved(path, False, True)   # have bold, fake the slant
-        path = _resolve(family, "italic")
-        if path:
-            return _Resolved(path, True, False)    # have italic, fake the weight
-        return _Resolved(_resolve(family, "regular"), True, True)
-    if bold:
-        path = _resolve(family, "bold")
-        return _Resolved(path, False, False) if path else _Resolved(_resolve(family, "regular"), True, False)
-    if italic:
-        path = _resolve(family, "italic")
-        return _Resolved(path, False, False) if path else _Resolved(_resolve(family, "regular"), False, True)
-    return _Resolved(_resolve(family, "regular"), False, False)
-
 
 @lru_cache(maxsize=1024)
 def _load_ttf(path: str | None, size: int) -> ImageFont.FreeTypeFont:
@@ -261,41 +162,6 @@ def _load_ttf(path: str | None, size: int) -> ImageFont.FreeTypeFont:
     except TypeError:
         return ImageFont.load_default()
 
-
-def missing_fonts() -> list[str]:
-    """Families with no real file for any weight — editor will still work,
-    just falls back to the system default rather than the intended look."""
-    out = []
-    for fam in ("display", "serif", "body"):
-        if _resolve(fam, "regular") is None:
-            out.append(fam)
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Colour helpers
-# ---------------------------------------------------------------------------
-
-
-def _luminance(c: RGB) -> float:
-    lin = []
-    for v in (c[0] / 255, c[1] / 255, c[2] / 255):
-        lin.append(v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4)
-    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
-
-
-def _mix(a: RGB, b: RGB, t: float) -> RGB:
-    return (round(a[0] + (b[0] - a[0]) * t), round(a[1] + (b[1] - a[1]) * t), round(a[2] + (b[2] - a[2]) * t))
-
-
-def _readable_on(bg: RGB) -> RGB:
-    return (20, 24, 28) if _luminance(bg) > 0.45 else (255, 255, 255)
-
-
-def _hex(c: RGB) -> str:
-    return "#%02x%02x%02x" % c
-
-
 def _from_hex(s: str, fallback: RGB = (0, 0, 0)) -> RGB:
     s = s.lstrip("#")
     if len(s) != 6:
@@ -305,13 +171,13 @@ def _from_hex(s: str, fallback: RGB = (0, 0, 0)) -> RGB:
     except ValueError:
         return fallback
 
+def _hex(c: RGB) -> str:
+    return "#%02x%02x%02x" % c
 
-def cover_crop(img: Image.Image, size: tuple[int, int], focus: tuple[float, float] = (0.5, 0.5),
-               zoom: float = 1.0) -> Image.Image:
-    """Fill the box without distorting; `zoom` > 1 lets the editor push in."""
+def cover_crop(img: Image.Image, size: tuple[int, int], focus: tuple[float, float] = (0.5, 0.5), zoom: float = 1.0) -> Image.Image:
     w, h = max(1, int(size[0])), max(1, int(size[1]))
     fitted = ImageOps.fit(img.convert("RGB"), (w, h), method=Image.Resampling.LANCZOS, centering=focus)
-    if zoom and zoom > 1.001:
+    if zoom > 1.001:
         zw, zh = int(w * zoom), int(h * zoom)
         big = ImageOps.fit(img.convert("RGB"), (zw, zh), method=Image.Resampling.LANCZOS, centering=focus)
         x0 = (zw - w) // 2
@@ -319,195 +185,84 @@ def cover_crop(img: Image.Image, size: tuple[int, int], focus: tuple[float, floa
         fitted = big.crop((x0, y0, x0 + w, y0 + h))
     return fitted
 
-
-def circle_mask(size: tuple[int, int]) -> Image.Image:
-    ss = 4
-    big = Image.new("L", (size[0] * ss, size[1] * ss), 0)
-    ImageDraw.Draw(big).ellipse((0, 0, size[0] * ss - 1, size[1] * ss - 1), fill=255)
-    return big.resize(size, Image.Resampling.LANCZOS)
-
-
 def default_logo(name: str = "LOGO", palette: Palette | None = None, size: int = 320) -> Image.Image:
-    """A clean placeholder mark so a post never ships with no logo at all —
-    a circular monogram badge. Meant to be replaced via the logo uploader."""
     pal = palette or THEMES["periwinkle"]
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.ellipse((0, 0, size - 1, size - 1), fill=(*pal.card, 255))
-    d.ellipse((size * 0.045, size * 0.045, size * 0.955, size * 0.955),
-              outline=(*pal.peek, 255), width=max(2, size // 45))
+    d.ellipse((size * 0.045, size * 0.045, size * 0.955, size * 0.955), outline=(*pal.peek, 255), width=max(2, size // 45))
     initials = "".join(w[0] for w in name.strip().split()[:2]).upper() or "L"
     path = _resolve("display", "bold")
     f = _load_ttf(path, int(size * 0.38))
     d.text((size / 2, size / 2), initials, font=f, fill=(*pal.ink, 255), anchor="mm")
     return img
 
-
 # ---------------------------------------------------------------------------
-# Text engine — wrapping, balancing, and styled-line rendering
+# Data Models: Layers, Post Specs, Slides, and Carousels
 # ---------------------------------------------------------------------------
-
-
-def _text_width(f: ImageFont.FreeTypeFont, s: str) -> float:
-    return f.getlength(s) if s else 0.0
-
-
-def _wrap(text: str, f: ImageFont.FreeTypeFont, max_w: float) -> list[str]:
-    lines: list[str] = []
-    for para in text.split("\n"):
-        words, current = para.split(), ""
-        if not words:
-            lines.append("")
-            continue
-        for word in words:
-            trial = f"{current} {word}".strip()
-            if _text_width(f, trial) <= max_w or not current:
-                current = trial
-            else:
-                lines.append(current)
-                current = word
-        lines.append(current)
-    return lines
-
-
-def _balanced(text: str, f: ImageFont.FreeTypeFont, max_w: float) -> list[str]:
-    base = _wrap(text, f, max_w)
-    if len(base) < 2:
-        return base
-    best, best_spread = base, _spread(base, f)
-    for pct in (0.96, 0.92, 0.88, 0.84, 0.80, 0.76, 0.72):
-        trial = _wrap(text, f, max_w * pct)
-        if len(trial) != len(base):
-            continue
-        spread = _spread(trial, f)
-        if spread < best_spread:
-            best, best_spread = trial, spread
-    return best
-
-
-def _spread(lines: list[str], f: ImageFont.FreeTypeFont) -> float:
-    widths = [_text_width(f, ln) for ln in lines]
-    return max(widths) - min(widths) if widths else 0.0
-
-
-def _fit_size(text: str, family: str, bold: bool, italic: bool, max_w: float, max_h: float,
-              hi: int, lo: int, leading: float, max_lines: int | None) -> tuple[int, list[str]]:
-    """Largest size at which the text fits its box — used only when building
-    the first draft; once a layer exists its size is whatever the user set."""
-    res = _resolve_style(family, bold, italic)
-    size = max(int(hi), int(lo))
-    lo = max(6, int(lo))
-    while size > lo:
-        f = _load_ttf(res.path, size)
-        lines = _balanced(text, f, max_w)
-        if len(lines) * size * leading <= max_h and (max_lines is None or len(lines) <= max_lines):
-            return size, lines
-        size -= max(1, round(size * 0.04))
-    f = _load_ttf(res.path, lo)
-    return lo, _wrap(text, f, max_w)
-
-
-def _render_line_tile(line: str, f: ImageFont.FreeTypeFont, colour: RGB,
-                      synthetic_bold: bool, synthetic_italic: bool) -> tuple[Image.Image, float]:
-    """One line of text as an RGBA tile, with synthetic bold/italic applied
-    when no real bold/italic font file was available. Returns (tile, width)
-    where width is the *unsheared* text width, used for layout math."""
-    if not line:
-        return Image.new("RGBA", (1, 1), (0, 0, 0, 0)), 0.0
-    bbox = f.getbbox(line)
-    pad = max(2, int(f.size * 0.18))
-    slant_pad = int(f.size * 0.45) if synthetic_italic else 0
-    w = int(bbox[2] - bbox[0]) + pad * 2 + slant_pad
-    h = int(f.size * 1.5)
-    tile = Image.new("RGBA", (max(1, w), max(1, h)), (0, 0, 0, 0))
-    d = ImageDraw.Draw(tile)
-    ox = pad - bbox[0]
-    stroke = max(1, round(f.size * 0.04)) if synthetic_bold else 0
-    d.text((ox, pad), line, font=f, fill=(*colour, 255),
-           stroke_width=stroke, stroke_fill=(*colour, 255))
-    if synthetic_italic:
-        shear = -0.22
-        tile = tile.transform(
-            (tile.width + int(abs(shear) * tile.height), tile.height),
-            Image.AFFINE, (1, shear, max(0, -shear) * tile.height, 0, 1, 0),
-            resample=Image.Resampling.BICUBIC,
-        )
-    text_w = _text_width(f, line)
-    return tile, text_w
-
-
-# ---------------------------------------------------------------------------
-# Layer model
-# ---------------------------------------------------------------------------
-
 
 def _new_id() -> str:
     return uuid.uuid4().hex[:8]
 
-
 @dataclass
 class TextStyle:
-    family: str = "display"        # "display" | "serif" | "body"
-    size: int = 44                 # design units at 1080 canvas width
+    family: str = "display"
+    size: int = 44
     color: RGB = (255, 255, 255)
     bold: bool = True
     italic: bool = False
     underline: bool = False
     highlight: bool = False
     highlight_color: RGB = (255, 230, 120)
-    align: str = "left"            # "left" | "center" | "right"
+    align: str = "left"
     leading: float = 1.22
-
 
 @dataclass
 class TextLayer:
     text: str
-    x: float = 0.08                # fraction of canvas width, box left
-    y: float = 0.10                # fraction of canvas height, box top
-    w: float = 0.60                # fraction of canvas width, box width
+    x: float = 0.08
+    y: float = 0.10
+    w: float = 0.60
     style: TextStyle = field(default_factory=TextStyle)
     visible: bool = True
-    kind: str = "custom"           # "headline" | "body" | "bullet" | "cta" | "contact" | "custom"
+    kind: str = "custom"
     id: str = field(default_factory=_new_id)
     label: str = "Text"
 
-
 @dataclass
 class ImageLayer:
-    image: Image.Image | None = None   # None => default_logo() is drawn
+    image: Image.Image | None = None
     x: float = 0.055
     y: float = 0.055
-    w: float = 0.14                    # fraction of canvas width; height keeps aspect
+    w: float = 0.14
     visible: bool = True
     is_default: bool = True
-
 
 @dataclass
 class BackgroundLayer:
     image: Image.Image | None = None
-    box: Box = (0.0, 0.0, 1.0, 1.0)    # fraction box the photo fills
+    box: Box = (0.0, 0.0, 1.0, 1.0)
     focus_x: float = 0.5
     focus_y: float = 0.42
     zoom: float = 1.0
-    tint: RGB | None = None            # optional flat colour if no photo
-
+    tint: RGB | None = None
 
 @dataclass
 class ContactInfo:
     phone: str = "+123-456-789"
-    email: str = "hello@yourfirm.co.uk"
-    website: str = "www.yourfirm.co.uk"
+    email: str = "hello@studio.com"
+    website: str = "www.studio.com"
     show_phone: bool = True
     show_email: bool = False
     show_website: bool = True
     color: RGB = (255, 255, 255)
-
 
 @dataclass
 class PostSpec:
     category: str = "Protection"
     template: str = "offset_card"
     theme: str = "periwinkle"
+    custom_palette: Palette | None = None
     fmt: str = "square"
     background: BackgroundLayer = field(default_factory=BackgroundLayer)
     logo: ImageLayer = field(default_factory=ImageLayer)
@@ -515,14 +270,22 @@ class PostSpec:
     contact: ContactInfo = field(default_factory=ContactInfo)
     scale: float = 1.0
 
+    def get_palette(self) -> Palette:
+        if self.theme == "custom" and self.custom_palette:
+            return self.custom_palette
+        return THEMES.get(self.theme, THEMES["periwinkle"])
+
     def layer(self, layer_id: str) -> TextLayer | None:
         return next((t for t in self.text_layers if t.id == layer_id), None)
 
+@dataclass
+class CarouselSpec:
+    slides: list[PostSpec] = field(default_factory=list)
+    active_index: int = 0
 
 # ---------------------------------------------------------------------------
-# Canvas — drawing primitives shared by templates and layers
+# Vector Canvas & Rendering Engine
 # ---------------------------------------------------------------------------
-
 
 class Canvas:
     def __init__(self, size: tuple[int, int], pal: Palette):
@@ -548,542 +311,139 @@ class Canvas:
         else:
             self.draw.rectangle(box, fill=(*fill, 255))
 
-    def layer_img(self) -> Image.Image:
-        return Image.new("RGBA", self.size, (0, 0, 0, 0))
-
-    def merge(self, layer: Image.Image) -> None:
-        self.img = Image.alpha_composite(self.img, layer)
-        self.draw = ImageDraw.Draw(self.img)
-
-    def paste(self, img: Image.Image, xy: tuple[int, int], mask: Image.Image | None = None) -> None:
-        self.img.paste(img, xy, mask if mask is not None else (img if img.mode == "RGBA" else None))
-        self.draw = ImageDraw.Draw(self.img)
-
-    def photo(self, img: Image.Image, box: Box, focus: tuple[float, float], zoom: float = 1.0,
-              mask: Image.Image | None = None) -> None:
-        x0, y0, x1, y1 = (int(v) for v in box)
-        panel = cover_crop(img, (x1 - x0, y1 - y0), focus, zoom)
-        if mask is not None and mask.size != panel.size:
-            mask = mask.resize(panel.size, Image.Resampling.LANCZOS)
-        self.img.paste(panel, (x0, y0), mask)
-        self.draw = ImageDraw.Draw(self.img)
-
     def result(self) -> Image.Image:
         return self.img.convert("RGB")
 
-
-# ---------------------------------------------------------------------------
-# Templates — paint only the decorative scaffolding (field / card / peek
-# slabs / photo panel). They return the geometry used to seed default
-# layer positions; they never draw text or the logo themselves.
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class Geometry:
-    card_box: Box           # fraction box: where headline/body/CTA start out
-    photo_box: Box | None   # fraction box: where the background photo sits
+    card_box: Box
+    photo_box: Box | None
     ink: RGB
     ink_muted: RGB
     contact_ink: RGB
-    contact_y: float        # fraction, baseline for the contact row
+    contact_y: float
     logo_xy: tuple[float, float]
-
 
 def _paint_offset_card(c: Canvas, pal: Palette) -> Geometry:
     card: Box = (0, c.fy(0.098), c.fx(0.923), c.fy(0.776))
     c.rect((c.fx(0.195), c.fy(0.080), c.fx(0.835), c.fy(0.118)), pal.peek)
     c.rect((c.fx(0.098), c.fy(0.760), c.fx(0.760), c.fy(0.869)), pal.peek)
-    c.rect((c.fx(0.955), c.fy(0.170), c.fx(1.0), c.fy(0.790)), pal.peek)
     c.rect(card, pal.card)
     return Geometry((0.09, 0.20, 0.80, 0.72), None, pal.ink, pal.ink_muted, pal.on_bg, 0.938, (0.055, 0.90))
 
-
 def _paint_card_photo(c: Canvas, pal: Palette) -> Geometry:
-    band_top = c.fy(0.775)
-    card: Box = (c.fx(0.10), c.fy(0.098), c.w, band_top)
-    c.rect((c.fx(0.055), c.fy(0.18), c.fx(0.105), c.fy(0.71)), pal.peek)
+    band_top = c.fy(0.75)
+    card: Box = (c.fx(0.08), c.fy(0.08), c.fx(0.92), band_top)
     c.rect(card, pal.card)
-    c.rect((c.fx(0.79), band_top, c.fx(0.875), band_top + c.fy(0.055)), pal.peek)
-    return Geometry((0.14, 0.16, 0.80, 0.56), (0.0, 0.775, 0.79, 1.0), pal.ink, pal.ink_muted,
-                    pal.on_bg, 0.052, (0.055, 0.052))
-
+    return Geometry((0.12, 0.14, 0.76, 0.55), (0.0, 0.75, 1.0, 1.0), pal.ink, pal.ink_muted, pal.on_bg, 0.052, (0.055, 0.052))
 
 def _paint_photo_side(c: Canvas, pal: Palette) -> Geometry:
-    tall = c.h / c.w > 1.15
-    if tall:
-        photo_box = (0.0, 0.0, 1.0, 0.40)
-        card: Box = (c.fx(0.07), c.fy(0.34), c.fx(0.97), c.fy(0.86))
-        peek: Box = (c.fx(0.11), c.fy(0.86), c.fx(0.93), c.fy(0.895))
-    else:
-        photo_box = (0.56, 0.0, 1.0, 1.0)
-        card = (c.fx(0.06), c.fy(0.13), c.fx(0.70), c.fy(0.87))
-        peek = (c.fx(0.02), c.fy(0.20), c.fx(0.06), c.fy(0.80))
-    c.rect((0, 0, c.w, c.h), _mix(pal.card, pal.bg, 0.5))
-    c.rect(peek, pal.peek)
+    card: Box = (c.fx(0.06), c.fy(0.10), c.fx(0.68), c.fy(0.88))
+    c.rect((0, 0, c.w, c.h), pal.bg)
     c.rect(card, pal.card)
-    return Geometry((0.12, 0.40, 0.78, 0.42), photo_box, pal.ink, pal.ink_muted, pal.on_bg,
-                    0.912, (0.055, 0.90))
-
+    return Geometry((0.10, 0.15, 0.60, 0.65), (0.55, 0.0, 1.0, 1.0), pal.ink, pal.ink_muted, pal.on_bg, 0.92, (0.055, 0.90))
 
 def _paint_arc(c: Canvas, pal: Palette) -> Geometry:
     r = max(c.w, c.h) * 0.62
     cx, cy = c.fx(0.30), c.fy(0.26)
     c.draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(*pal.pale, 255))
-    r2 = max(c.w, c.h) * 0.16
-    c.draw.ellipse((c.w - r2 * 0.55, c.h - r2 * 0.75, c.w + r2, c.h + r2), fill=(*pal.peek, 255))
-    c.rect((c.fx(0.90), c.fy(0.14), c.fx(0.945), c.fy(0.52)), pal.peek)
-    return Geometry((0.13, 0.13, 0.58, 0.42), None, pal.pale_ink, _mix(pal.pale_ink, pal.pale, 0.3),
-                    pal.on_bg, 0.938, (0.055, 0.90))
-
-
-def _paint_circle_photo(c: Canvas, pal: Palette) -> Geometry:
-    c.rect((c.fx(0.09), c.fy(0.09), c.fx(0.99), c.fy(0.90)), pal.card)
-    c.rect((c.fx(0.05), c.fy(0.05), c.fx(0.95), c.fy(0.86)), pal.pale)
-    d = min(c.fx(0.40), c.fy(0.40))
-    return Geometry((0.09, 0.16, 0.46, 0.55), (0.60, 0.10, 0.60 + d / c.w, 0.10 + d / c.h),
-                    pal.pale_ink, _mix(pal.pale_ink, pal.pale, 0.28), pal.on_bg, 0.938, (0.055, 0.90))
-
+    return Geometry((0.10, 0.12, 0.60, 0.45), None, pal.pale_ink, pal.ink_muted, pal.on_bg, 0.938, (0.055, 0.90))
 
 def _paint_banner(c: Canvas, pal: Palette) -> Geometry:
-    band: Box = (0, c.fy(0.10), c.w, c.fy(0.52))
-    layer = c.layer_img()
-    ImageDraw.Draw(layer).rectangle(band, fill=(*pal.card, 209))
-    c.merge(layer)
-    ink = _readable_on(pal.card)
-    return Geometry((0.10, 0.13, 0.80, 0.34), (0.0, 0.0, 1.0, 1.0), ink, _mix(ink, pal.card, 0.25),
-                    pal.on_bg, 0.938, (0.055, 0.90))
-
+    band: Box = (0, c.fy(0.15), c.w, c.fy(0.60))
+    c.rect(band, pal.card)
+    return Geometry((0.08, 0.18, 0.84, 0.38), (0.0, 0.0, 1.0, 1.0), pal.ink, pal.ink_muted, pal.on_bg, 0.938, (0.055, 0.90))
 
 _PAINTERS: dict[str, Callable[[Canvas, Palette], Geometry]] = {
     "offset_card": _paint_offset_card,
     "card_photo": _paint_card_photo,
     "photo_side": _paint_photo_side,
     "arc": _paint_arc,
-    "circle_photo": _paint_circle_photo,
     "banner": _paint_banner,
 }
 
-TEMPLATES = _PAINTERS  # exported name expected elsewhere
+TEMPLATES = _PAINTERS
 TEMPLATE_LABELS = {
-    "offset_card": "Offset card — solid panel, peek slabs, no photo needed",
-    "card_photo": "Card and photo band — card above, photo across the base",
-    "photo_side": "Photo side panel — card overlapping a full-height photo",
-    "arc": "Arc — oversized circle bleeding off the corner",
-    "circle_photo": "Circle photo — pale card with a round portrait",
-    "banner": "Banner — full-bleed photo with a translucent copy band",
+    "offset_card": "Offset Card — Modern layered cards with vector peek accents",
+    "card_photo": "Card & Photo — Clear headline card with photo base",
+    "photo_side": "Split Photo Side — Clean typography card beside image field",
+    "arc": "Arc Vector — Circular geometric background vector cut",
+    "banner": "Translucent Banner — Text banner standard layout"
 }
-
-
-# ---------------------------------------------------------------------------
-# Drawing a single text layer with full styling
-# ---------------------------------------------------------------------------
-
 
 def draw_text_layer(c: Canvas, layer: TextLayer) -> None:
     if not layer.visible or not layer.text.strip():
         return
     st = layer.style
-    res = _resolve_style(st.family, st.bold, st.italic)
+    path = _resolve(st.family, "bold" if st.bold else "regular")
     size_px = max(8, int(c.s(st.size)))
-    f = _load_ttf(res.path, size_px)
-
+    f = _load_ttf(path, size_px)
     max_w = max(c.s(40), c.fx(layer.w))
-    lines = _balanced(layer.text, f, max_w)
+
+    # Custom simple text render
+    words = layer.text.split()
+    lines, curr = [], ""
+    for w in words:
+        trial = f"{curr} {w}".strip()
+        if f.getlength(trial) <= max_w or not curr:
+            curr = trial
+        else:
+            lines.append(curr)
+            curr = w
+    if curr:
+        lines.append(curr)
+
     x0 = c.fx(layer.x)
     y = c.fy(layer.y)
     line_h = size_px * st.leading
 
     for line in lines:
-        tile, text_w = _render_line_tile(line, f, st.color, res.synthetic_bold, res.synthetic_italic)
-        if st.align == "center":
-            lx = x0 + (max_w - text_w) / 2
-        elif st.align == "right":
-            lx = x0 + (max_w - text_w)
-        else:
-            lx = x0
-
-        if st.highlight and line.strip():
-            pad_x, pad_y = c.s(7), size_px * 0.12
-            c.rect((lx - pad_x, y - pad_y, lx + text_w + pad_x, y + size_px * 1.06 + pad_y),
-                   st.highlight_color)
-
-        # tile has its own left padding baked in; correct for it on paste
-        tile_pad = max(2, int(size_px * 0.18))
-        c.paste(tile, (int(lx - tile_pad), int(y - tile_pad)))
-
-        if st.underline and line.strip():
-            uy = y + size_px * 0.98
-            c.draw.line((lx, uy, lx + text_w, uy), fill=(*st.color, 255),
-                       width=max(2, int(c.s(st.size * 0.045))))
+        tw = f.getlength(line)
+        lx = x0 + (max_w - tw) / 2 if st.align == "center" else (x0 + max_w - tw if st.align == "right" else x0)
+        if st.highlight:
+            c.rect((lx - 4, y - 2, lx + tw + 4, y + size_px + 2), st.highlight_color)
+        c.draw.text((lx, y), line, font=f, fill=(*st.color, 255))
         y += line_h
-
-
-def _cta_box(c: Canvas, layer: TextLayer, pal: Palette) -> None:
-    """CTA layers render as a pill instead of plain text."""
-    st = layer.style
-    res = _resolve_style(st.family, True, st.italic)
-    size_px = max(8, int(c.s(st.size)))
-    f = _load_ttf(res.path, size_px)
-    label = layer.text
-    pad_x, pad_y = c.s(28), c.s(15)
-    w = f.getlength(label) + pad_x * 2
-    h = size_px * 1.25 + pad_y * 2
-    x0 = c.fx(layer.x)
-    max_w = c.fx(layer.w)
-    if st.align == "center":
-        x0 = x0 + (max_w - w) / 2
-    elif st.align == "right":
-        x0 = x0 + (max_w - w)
-    y0 = c.fy(layer.y)
-    c.draw.rounded_rectangle((x0, y0, x0 + w, y0 + h), radius=h / 2, fill=(*pal.cta_bg, 255))
-    c.draw.text((x0 + w / 2, y0 + h / 2), label, font=f, fill=(*pal.cta_ink, 255), anchor="mm")
-
-
-# ---------------------------------------------------------------------------
-# Logo + contact chrome
-# ---------------------------------------------------------------------------
-
-
-def draw_logo(c: Canvas, logo: ImageLayer, brand_name: str, pal: Palette) -> None:
-    if not logo.visible:
-        return
-    img = logo.image if logo.image is not None else default_logo(brand_name, pal)
-    target_w = max(8, c.fx(logo.w))
-    ratio = target_w / img.width
-    target_h = max(8, int(img.height * ratio))
-    resized = img.resize((int(target_w), target_h), Image.Resampling.LANCZOS)
-    x, y = int(c.fx(logo.x)), int(c.fy(logo.y))
-    layer = c.layer_img()
-    layer.paste(resized, (x, y), resized if resized.mode == "RGBA" else None)
-    c.merge(layer)
-
-
-def _phone_glyph(c: Canvas, cx: float, cy: float, size: float, colour: RGB) -> None:
-    n = max(48, int(size * 6))
-    tile = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-    d = ImageDraw.Draw(tile)
-    fill = (*colour, 255)
-    pad, stroke = n * 0.12, n * 0.25
-    d.arc((pad, pad, n - pad, n - pad), start=200, end=340, fill=fill, width=int(stroke))
-    r = (n - 2 * pad) / 2 - stroke / 2
-    for ang in (200, 340):
-        rad = math.radians(ang)
-        x, y = n / 2 + r * math.cos(rad), n / 2 + r * math.sin(rad)
-        d.ellipse((x - stroke / 2, y - stroke / 2, x + stroke / 2, y + stroke / 2), fill=fill)
-    tile = tile.rotate(-45, resample=Image.Resampling.BICUBIC)
-    side = max(1, int(size))
-    tile = tile.resize((side, side), Image.Resampling.LANCZOS)
-    layer = c.layer_img()
-    layer.paste(tile, (int(cx - side / 2), int(cy - side / 2)), tile)
-    c.merge(layer)
-
-
-def draw_contact(c: Canvas, contact: ContactInfo, y_frac: float, margin_frac: float = 0.061) -> None:
-    parts = []
-    if contact.show_email and contact.email:
-        parts.append(("mail", contact.email))
-    if contact.show_website and contact.website:
-        parts.append(("text", contact.website))
-    y = c.fy(y_frac)
-    right = c.w - c.fx(margin_frac)
-    f = _load_ttf(_resolve("display", "bold"), int(c.s(24)))
-    fbody = _load_ttf(_resolve("body", "regular"), int(c.s(20)))
-
-    if contact.show_phone and contact.phone:
-        num_w = f.getlength(contact.phone)
-        c.draw.text((right, y), contact.phone, font=f, fill=(*contact.color, 255), anchor="rm")
-        _phone_glyph(c, right - num_w - c.s(32), y, c.s(32), contact.color)
-        right -= num_w + c.s(64)
-
-    for kind, text in reversed(parts):
-        w = fbody.getlength(text)
-        c.draw.text((right, y), text, font=fbody, fill=(*contact.color, 235), anchor="rm")
-        right -= w + c.s(36)
-
-
-# ---------------------------------------------------------------------------
-# Building a first draft
-# ---------------------------------------------------------------------------
-
-
-def get_sample_designs() -> list[dict]:
-    """Discover all sample reference design assets in the sample_design_references directory."""
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    ref_dir = os.path.join(base_dir, "sample_design_references")
-    designs = []
-    if not os.path.exists(ref_dir):
-        return designs
-    for cat in sorted(os.listdir(ref_dir)):
-        cat_path = os.path.join(ref_dir, cat)
-        if os.path.isdir(cat_path):
-            for fname in sorted(os.listdir(cat_path)):
-                if fname.startswith('.'):
-                    continue
-                fpath = os.path.join(cat_path, fname)
-                ext = os.path.splitext(fname)[1].lower()
-                is_video = ext in ('.mp4', '.mov', '.avi', '.mkv')
-                is_image = ext in ('.webp', '.png', '.jpg', '.jpeg')
-                if is_image or is_video:
-                    label = fname.replace('-', ' ').replace('_', ' ')
-                    label = os.path.splitext(label)[0]
-                    designs.append({
-                        'category': cat,
-                        'filename': fname,
-                        'path': fpath,
-                        'label': label,
-                        'is_video': is_video,
-                        'is_image': is_image,
-                    })
-    return designs
-
-
-def _clean_sample_title(label: str) -> str:
-    """Clean filename stems into readable title strings."""
-    import re
-    s = re.sub(r'\d+x\d+', '', label)
-    s = re.sub(r'\b\d{6,8}\b', '', s)
-    s = s.replace('Post', '').replace('Graphic', '').replace('Modern', '').replace('Cover', '').strip()
-    words = [w.capitalize() for w in s.split() if w.strip()]
-    return " ".join(words) if words else label
-
-
-def build_sample_template_spec(
-    sample_item: dict,
-    brand_name: str = "LOGO",
-    contact: ContactInfo | None = None,
-    theme_key: str | None = None,
-    template_key: str | None = None,
-    use_reference_image: bool = False,
-) -> PostSpec:
-    """Convert a sample design reference into a fully editable PostSpec.
-
-    By default NOTHING from the sample's raster file ends up in the result —
-    only its *category*, and therefore its matched palette/layout/copy, is
-    carried over. The post is built the same way `new_post()` builds a fresh
-    draft: a procedurally-painted template (flat colour panels, peek slabs,
-    card) plus independent Headline / Body / CTA / Logo / Contact layers.
-    Every pixel is either a themed shape (recolourable by switching palette
-    or layout) or a layer the editor already knows how to edit — so the
-    sample acts purely as a starting point, the way opening a template in
-    Canva does, rather than as a locked-in picture.
-
-    Pass `use_reference_image=True` if the person explicitly wants the
-    sample's photo itself to become their background photo (still editable
-    afterwards via the normal background-photo controls — replace, crop,
-    zoom, or remove it entirely).
-    """
-    cat = sample_item.get("category", "Protection")
-    label = sample_item.get("label", "")
-    fpath = sample_item.get("path", "")
-    is_image = sample_item.get("is_image", False)
-
-    clean_title = _clean_sample_title(label)
-
-    # --- pick theme ---------------------------------------------------
-    if not theme_key:
-        preset = CATEGORY_PRESETS.get(cat, {"theme": "periwinkle", "template": "offset_card"})
-        theme_key = preset["theme"]
-
-    # --- pick template — always card-backed so photo panel is separate -
-    # Templates that place an opaque card over the text area and keep the
-    # photo in its own region: photo_side, card_photo, offset_card.
-    # "banner" (full-bleed photo) is intentionally avoided here because it
-    # would expose the source image's baked-in text under the editable layers.
-    if not template_key:
-        l_lower = label.lower()
-        if "mortgage" in l_lower or "sdlt" in l_lower or "stamp" in l_lower:
-            template_key = "photo_side"
-            theme_key = theme_key or "brick"
-        elif "retire" in l_lower or "freedom" in l_lower or "pension" in l_lower or "savings" in l_lower:
-            template_key = "card_photo"
-            theme_key = theme_key or "royal"
-        elif "invest" in l_lower or "estate" in l_lower or "diversify" in l_lower:
-            template_key = "photo_side"
-            theme_key = theme_key or "ivory"
-        elif "critical" in l_lower or "cic" in l_lower or "life" in l_lower or "protect" in l_lower or "insure" in l_lower or "cover" in l_lower:
-            template_key = "offset_card"
-            theme_key = theme_key or "periwinkle"
-        elif "lifestyle" in l_lower or "future" in l_lower or "holistic" in l_lower or "planning" in l_lower:
-            template_key = "card_photo"
-            theme_key = theme_key or "mustard"
-        else:
-            template_key = "photo_side"
-
-    headline = clean_title if clean_title else f"{cat} — Key Considerations"
-    headline = headline[:80]  # keep it to one or two lines
-
-    body_copy = {
-        "Retirement": "Planning early gives you clarity on pension options and tax implications.\nCapital and pension values can fall as well as rise.",
-        "Investment": "A diversified strategy aligned with your goals and risk appetite.\nCapital is at risk — returns are never guaranteed.",
-        "Protection": "Safeguard your family's financial security against unexpected events\nwith tailored insurance cover designed around your circumstances.",
-        "Mortgage": "Understanding your rate, deposit and affordability before you commit.\nYour home may be at risk if you do not keep up mortgage repayments.",
-        "Employee Benefit": "An informational overview of the workplace benefits and group\nscheme options available to your team.",
-        "Investment and Estate Planning": "Structuring wealth efficiently across generations.\nTax treatment depends on individual circumstances and may change.",
-        "Pension": "Reviewing scheme performance and consolidation options\nto keep your pension aligned with your retirement objectives.",
-        "Lifestyle": "Aligning your financial strategy with the milestones\nand lifestyle choices that matter most to you.",
-    }.get(cat, "Financial decisions are personal and depend on your individual\ncircumstances, goals, and attitude to risk.")
-
-    cta = {
-        "Mortgage": "Speak to a regulated adviser",
-        "Retirement": "Book a retirement review",
-        "Pension": "Review your scheme options",
-        "Protection": "Explore your cover options",
-        "Investment": "Discuss your portfolio strategy",
-        "Investment and Estate Planning": "Request a consultation",
-        "Lifestyle": "Start your financial plan",
-        "Employee Benefit": "Find out what's available",
-    }.get(cat, "Talk through your options")
-
-    # The sample raster is reference-only by default — it is shown as a
-    # read-only preview in the gallery but is NOT baked into the result, so
-    # every element of the opened template stays a genuine, editable layer.
-    # Only load it as the background photo if the person opted in.
-    bg_img = None
-    if use_reference_image and is_image and os.path.exists(fpath):
-        try:
-            bg_img = Image.open(fpath).convert("RGB")
-        except Exception:
-            bg_img = None
-
-    return new_post(
-        headline=headline,
-        body=body_copy,
-        cta=cta,
-        category=cat,
-        brand_name=brand_name,
-        background_image=bg_img,
-        contact=contact,
-        template=template_key,
-        theme=theme_key,
-        fmt="square",
-    )
-
-
-def _open_image(src) -> Image.Image | None:
-    if src is None:
-        return None
-    if isinstance(src, Image.Image):
-        return src.copy()
-    try:
-        with Image.open(src) as im:
-            return im.convert("RGB")
-    except Exception:
-        return None
-
-
-def new_post(headline: str, body: str = "", bullets: Sequence[str] = (), cta: str = "",
-            category: str = "Protection", brand_name: str = "LOGO",
-            logo_image=None, background_image=None,
-            contact: ContactInfo | None = None,
-            template: str | None = None, theme: str | None = None,
-            fmt: str = "square") -> PostSpec:
-    """Build a first-draft PostSpec: sensible layers, positioned by the
-    chosen template, fully editable afterwards."""
-    preset = CATEGORY_PRESETS.get(category, {"theme": "periwinkle", "template": "offset_card"})
-    template = template or preset["template"]
-    theme_key = theme or preset["theme"]
-    pal = THEMES.get(theme_key, THEMES["periwinkle"])
-
-    probe = Canvas(FORMATS.get(fmt, FORMATS["square"]), pal)
-    geo = _PAINTERS.get(template, _paint_offset_card)(probe, pal)
-
-    cx0, cy0, cw, chh = geo.card_box
-    layers: list[TextLayer] = []
-
-    body_or_bullets = bool(body) or bool(bullets)
-    hsize, hlines = _fit_size(headline, "display", True, False, probe.fx(cw),
-                              probe.fy(chh * (0.55 if body_or_bullets else 0.9)),
-                              hi=90, lo=32, leading=1.14, max_lines=4)
-    layers.append(TextLayer(
-        text=headline, x=cx0, y=cy0, w=cw, kind="headline", label="Headline",
-        style=TextStyle(family="display", size=hsize, color=geo.ink, bold=True, align="left", leading=1.14),
-    ))
-    y_cursor = cy0 + (hsize * 1.14 * len(hlines)) / probe.h + 0.035
-
-    bullets = [b for b in bullets if b.strip()]
-    if bullets:
-        bsize = max(18, min(30, int(hsize * 0.42)))
-        step = (bsize * 1.55) / 1080 + 0.028
-        for i, b in enumerate(bullets[:6]):
-            layers.append(TextLayer(
-                text=f"•  {b}", x=cx0, y=y_cursor + step * i, w=cw, kind="bullet", label=f"Bullet {i+1}",
-                style=TextStyle(family="body", size=bsize, color=geo.ink_muted, bold=False, align="left", leading=1.34),
-            ))
-        y_cursor += step * len(bullets[:6]) + 0.04
-    elif body:
-        bsize = max(19, min(30, int(hsize * 0.40)))
-        layers.append(TextLayer(
-            text=body, x=cx0, y=y_cursor + 0.03, w=cw, kind="body", label="Body",
-            style=TextStyle(family="body", size=bsize, color=geo.ink_muted, bold=False, align="left", leading=1.42),
-        ))
-        _, blines = _fit_size(body, "body", False, False, probe.fx(cw), probe.fy(0.5), hi=bsize, lo=bsize,
-                              leading=1.42, max_lines=None)
-        y_cursor += 0.03 + (bsize * 1.42 / 1080) * len(blines) + 0.045
-
-    if cta:
-        layers.append(TextLayer(
-            text=cta, x=cx0, y=min(y_cursor, cy0 + chh - 0.10), w=cw, kind="cta", label="Call to action",
-            style=TextStyle(family="display", size=23, color=pal.cta_ink, bold=True, align="left"),
-        ))
-
-    contact = contact or ContactInfo(color=geo.contact_ink)
-    contact.color = geo.contact_ink if contact.color == (255, 255, 255) else contact.color
-
-    bg = BackgroundLayer(
-        image=_open_image(background_image),
-        box=geo.photo_box or (0.0, 0.0, 1.0, 1.0),
-        focus_x=0.5, focus_y=0.42, zoom=1.0,
-    )
-    logo = ImageLayer(
-        image=_open_image(logo_image), x=geo.logo_xy[0], y=geo.logo_xy[1] - 0.045, w=0.15,
-        is_default=logo_image is None,
-    )
-
-    return PostSpec(category=category, template=template, theme=theme_key, fmt=fmt,
-                    background=bg, logo=logo, text_layers=layers, contact=contact)
-
-
-# ---------------------------------------------------------------------------
-# Render — flatten scaffolding + background photo + every layer
-# ---------------------------------------------------------------------------
-
 
 def render(spec: PostSpec) -> Image.Image:
     base_w, base_h = FORMATS.get(spec.fmt, FORMATS["square"])
-    scale = max(0.25, min(4.0, spec.scale))
-    size = (int(base_w * scale), int(base_h * scale))
-    pal = THEMES.get(spec.theme, THEMES["periwinkle"])
+    size = (int(base_w * spec.scale), int(base_h * spec.scale))
+    pal = spec.get_palette()
 
     c = Canvas(size, pal)
     geo = _PAINTERS.get(spec.template, _paint_offset_card)(c, pal)
 
-    if spec.background.image is not None and spec.background.box:
-        box: Box = (c.fx(spec.background.box[0]), c.fy(spec.background.box[1]),
-                    c.fx(spec.background.box[2]), c.fy(spec.background.box[3]))
-        mask = None
-        if spec.template == "circle_photo":
-            mask = circle_mask((int(box[2] - box[0]), int(box[3] - box[1])))
-        c.photo(spec.background.image, box, (spec.background.focus_x, spec.background.focus_y),
-               spec.background.zoom, mask)
-    elif spec.background.image is not None and spec.template == "banner":
-        c.photo(spec.background.image, (0, 0, c.w, c.h),
-               (spec.background.focus_x, spec.background.focus_y), spec.background.zoom)
-        # repaint the translucent band on top since the photo just covered it
-        _PAINTERS["banner"](c, pal)
+    if spec.background.image is not None:
+        box = (c.fx(spec.background.box[0]), c.fy(spec.background.box[1]), c.fx(spec.background.box[2]), c.fy(spec.background.box[3]))
+        panel = cover_crop(spec.background.image, (int(box[2] - box[0]), int(box[3] - box[1])), (spec.background.focus_x, spec.background.focus_y), spec.background.zoom)
+        c.img.paste(panel, (int(box[0]), int(box[1])))
 
     for tl in spec.text_layers:
-        if tl.kind == "cta":
-            if tl.visible and tl.text.strip():
-                _cta_box(c, tl, pal)
-        else:
-            draw_text_layer(c, tl)
+        draw_text_layer(c, tl)
 
-    draw_logo(c, spec.logo, "Firm", pal)
-    draw_contact(c, spec.contact, geo.contact_y)
+    # Draw logo placeholder/uploaded logo
+    if spec.logo.visible:
+        logo_img = spec.logo.image or default_logo("STUDIO", pal)
+        lw = int(c.fx(spec.logo.w))
+        lh = int(logo_img.height * (lw / logo_img.width))
+        resized = logo_img.resize((lw, max(1, lh)), Image.Resampling.LANCZOS)
+        c.img.paste(resized, (int(c.fx(spec.logo.x)), int(c.fy(spec.logo.y))), resized if resized.mode == "RGBA" else None)
 
     return c.result()
 
+def new_post(headline: str, body: str = "", cta: str = "", category: str = "Protection",
+             fmt: str = "square", template: str = "offset_card", theme: str = "periwinkle") -> PostSpec:
+    pal = THEMES.get(theme, THEMES["periwinkle"])
+    layers = [
+        TextLayer(text=headline, x=0.1, y=0.18, w=0.75, label="Headline",
+                  style=TextStyle(family="display", size=48, color=pal.ink, bold=True)),
+        TextLayer(text=body, x=0.1, y=0.38, w=0.75, label="Body Copy",
+                  style=TextStyle(family="body", size=24, color=pal.ink_muted, bold=False))
+    ]
+    if cta:
+        layers.append(TextLayer(text=cta, x=0.1, y=0.68, w=0.5, label="CTA",
+                                style=TextStyle(family="display", size=22, color=pal.cta_bg, bold=True)))
+    return PostSpec(category=category, template=template, theme=theme, fmt=fmt, text_layers=layers)
 
 def build_post_canvas(
     headline: str,
@@ -1094,403 +454,129 @@ def build_post_canvas(
     contact_text: str = "hello@adviser.co.uk • 020 0000 0000 • adviser.co.uk",
     background_path: str | None = None,
 ) -> Image.Image:
-    """Backwards-compatible shim for the original call signature."""
-    theme = {"gold": "mustard", "navy": "royal", "green": "sage",
-             "purple": "periwinkle", "teal": "sage"}.get(accent.lower(), "periwinkle")
-    parts = [p.strip() for p in contact_text.split("•")]
-    email = next((p for p in parts if "@" in p), "")
-    phone = next((p for p in parts if any(ch.isdigit() for ch in p) and "@" not in p), "")
-    website = next((p for p in parts if p and p != email and p != phone), "")
-    spec = new_post(
-        headline, body, category=category if category in CATEGORY_PRESETS else "Protection",
-        brand_name=logo_text, background_image=background_path, theme=theme,
-        template="photo_side" if background_path else "offset_card",
-        contact=ContactInfo(phone=phone, email=email, website=website,
-                            show_phone=bool(phone), show_email=bool(email), show_website=bool(website)),
-    )
+    """Keep the original canvas API available to the app and legacy callers."""
+    theme = {"gold": "mustard", "navy": "royal", "green": "emerald",
+             "purple": "periwinkle", "teal": "emerald"}.get(accent.lower(), "periwinkle")
+    category = category if category in CATEGORY_PRESETS else "Protection"
+    template = "photo_side" if background_path else "offset_card"
+    spec = new_post(headline, body, category=category, template=template, theme=theme)
+    spec.logo.image = default_logo(logo_text, spec.get_palette())
+    spec.logo.is_default = False
+    if background_path:
+        try:
+            with Image.open(background_path) as background:
+                spec.background.image = background.convert("RGB")
+        except (OSError, ValueError):
+            pass
+    if contact_text:
+        spec.text_layers.append(TextLayer(
+            text=contact_text, x=0.08, y=0.93, w=0.84, label="Contact",
+            style=TextStyle(family="body", size=16, color=spec.get_palette().on_bg, bold=False),
+        ))
     return render(spec)
 
+def render_carousel(carousel: CarouselSpec) -> list[Image.Image]:
+    return [render(slide) for slide in carousel.slides]
+
+def export_reel_video(slides: list[PostSpec], fps: int = 2) -> bytes:
+    """Renders carousel slides into an animated video or GIF reel bytes."""
+    images = [render(s) for s in slides]
+    buf = io.BytesIO()
+    if HAS_IMAGEIO:
+        import numpy as np
+        frames = [np.array(img) for img in images]
+        imageio.mimsave(buf, frames, format="MP4", fps=fps)
+    else:
+        images[0].save(buf, format="GIF", save_all=True, append_images=images[1:], duration=int(1000/fps), loop=0)
+    return buf.getvalue()
 
 # ---------------------------------------------------------------------------
-# Streamlit editor
+# Streamlit Interactive Studio UI
 # ---------------------------------------------------------------------------
-
-
-def _color_picker(st, label: str, value: RGB, key: str) -> RGB:
-    return _from_hex(st.color_picker(label, _hex(value), key=key), value)
-
-
-def _layer_controls(st, spec: PostSpec, layer: TextLayer) -> None:
-    st.text_area("Text", layer.text, key=f"txt_{layer.id}", height=90)
-    layer.text = st.session_state[f"txt_{layer.id}"]
-
-    cols = st.columns(3)
-    fam_keys = list(FONT_FAMILIES)
-    layer.style.family = cols[0].selectbox(
-        "Font", fam_keys, index=fam_keys.index(layer.style.family),
-        format_func=lambda k: FONT_FAMILIES[k], key=f"fam_{layer.id}")
-    layer.style.size = cols[1].slider("Size", 12, 140, layer.style.size, key=f"size_{layer.id}")
-    layer.style.color = _color_picker(cols[2], "Colour", layer.style.color, f"col_{layer.id}")
-
-    cols2 = st.columns(4)
-    layer.style.bold = cols2[0].checkbox("Bold", layer.style.bold, key=f"b_{layer.id}")
-    layer.style.italic = cols2[1].checkbox("Italic", layer.style.italic, key=f"i_{layer.id}")
-    layer.style.underline = cols2[2].checkbox("Underline", layer.style.underline, key=f"u_{layer.id}")
-    layer.style.highlight = cols2[3].checkbox("Highlight", layer.style.highlight, key=f"h_{layer.id}")
-    if layer.style.highlight:
-        layer.style.highlight_color = _color_picker(st, "Highlight colour", layer.style.highlight_color,
-                                                     f"hc_{layer.id}")
-
-    layer.style.align = st.radio("Alignment", ["left", "center", "right"],
-                                 index=["left", "center", "right"].index(layer.style.align),
-                                 horizontal=True, key=f"al_{layer.id}")
-
-    st.caption("Position and box width (fractions of the canvas)")
-    p = st.columns(3)
-    layer.x = p[0].slider("X", 0.0, 0.95, layer.x, 0.01, key=f"x_{layer.id}")
-    layer.y = p[1].slider("Y", 0.0, 0.95, layer.y, 0.01, key=f"y_{layer.id}")
-    layer.w = p[2].slider("Width", 0.05, 1.0, layer.w, 0.01, key=f"w_{layer.id}")
-
-    layer.visible = st.checkbox("Visible", layer.visible, key=f"vis_{layer.id}")
-    if layer.kind == "custom":
-        if st.button("Delete this text box", key=f"del_{layer.id}"):
-            spec.text_layers = [t for t in spec.text_layers if t.id != layer.id]
-            st.rerun()
-
-
-def _inject_studio_theme(st) -> None:
-    st.markdown(
-        """
-        <style>
-        .ps-header{background:linear-gradient(120deg,#0f1f33 0%,#1e3a5f 100%);
-            border-radius:12px;padding:20px 24px;margin-bottom:14px;}
-        .ps-header h2{color:#fff;font-size:1.3rem;font-weight:700;margin:0 0 4px 0;}
-        .ps-header p{color:#c7d4e6;font-size:0.88rem;margin:0;line-height:1.5;}
-        .ps-step{display:inline-flex;align-items:center;gap:8px;font-weight:700;
-            color:#1e2a3a;font-size:0.95rem;margin:4px 0 10px 0;}
-        .ps-step .num{display:inline-flex;align-items:center;justify-content:center;
-            width:22px;height:22px;border-radius:50%;background:#2563eb;color:#fff;
-            font-size:0.72rem;flex-shrink:0;}
-        .ps-notice{background:#fff7e6;border:1px solid #f3d9a8;border-left:4px solid #b45309;
-            border-radius:0 8px 8px 0;padding:8px 14px;margin-bottom:14px;color:#6b4a12;
-            font-size:0.85rem;}
-        .ps-card{border:1px solid #e3e9f0;border-radius:10px;padding:16px 18px;
-            background:#ffffff;margin-bottom:12px;}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
 
 def post_studio_ui() -> None:
-    """A complete post editor page: draft generator + per-layer controls +
-    live preview + PNG download. Pure Streamlit + Pillow, no JS."""
-    import io
-
     import streamlit as st
+    st.set_page_config(layout="wide", page_title="Post & Reel Studio")
+    st.title("Customizable Post, Reel & Carousel Studio")
 
-    try:
-        from streamlit_image_coordinates import streamlit_image_coordinates as _img_coords
-    except ImportError:
-        _img_coords = None
+    if "carousel" not in st.session_state:
+        st.session_state["carousel"] = CarouselSpec(slides=[new_post("Customizable Social Posts", "Design reels, carousels, and square posts effortlessly with dynamic vector themes.", "Swipe Left ➔")])
 
-    _inject_studio_theme(st)
+    car: CarouselSpec = st.session_state["carousel"]
 
-    st.markdown(
-        """
-        <div class="ps-header">
-            <h2>🖌️ Post studio</h2>
-            <p>Start from a sample or a blank draft, then edit every headline, image and colour directly.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # Carousel Management Bar
+    st.subheader("Slide & Format Settings")
+    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
 
-    gaps = missing_fonts()
-    if gaps:
-        st.markdown(
-            f'<div class="ps-notice">Fallback fonts in use for: {", ".join(gaps)}. '
-            f"Drop .ttf files into ./assets/fonts to match the house style exactly.</div>",
-            unsafe_allow_html=True,
-        )
+    active_idx = c1.number_input("Active Slide", min_value=1, max_value=len(car.slides), value=car.active_index + 1) - 1
+    car.active_index = active_idx
+    spec = car.slides[active_idx]
 
-    if "spec" not in st.session_state:
-        st.session_state["spec"] = new_post(
-            "A Lifetime of Cover, for a Lifetime of Love",
-            "Whole of Life insurance offers fixed protection, helping ensure loved ones "
-            "are taken care of no matter when it's needed.",
-            category="Protection",
-        )
+    spec.fmt = c2.selectbox("Canvas Format", list(FORMATS.keys()), index=list(FORMATS.keys()).index(spec.fmt))
 
-    spec: PostSpec = st.session_state["spec"]
+    if c3.button("➕ Add Slide"):
+        car.slides.append(new_post(f"Slide {len(car.slides)+1} Title", "Content text goes here."))
+        st.rerun()
 
-    # ----------------------------------------------------- Step 1: starting point
-    st.markdown('<div class="ps-step"><span class="num">1</span> Choose a starting point</div>',
-                unsafe_allow_html=True)
+    if c4.button("Delete Slide") and len(car.slides) > 1:
+        car.slides.pop(active_idx)
+        car.active_index = max(0, active_idx - 1)
+        st.rerun()
 
-    tab_samples, tab_blank = st.tabs(["🎨 Sample templates", "✏️ Start from scratch"])
-
-    with tab_samples:
-        _sample_gallery_ui(st, spec)
-
-    with tab_blank:
-        d1, d2 = st.columns(2)
-        category = d1.selectbox("Category", list(CATEGORY_PRESETS))
-        fmt = d2.selectbox("Format", list(FORMATS),
-                           format_func=lambda k: f"{k} — {FORMATS[k][0]}x{FORMATS[k][1]}")
-        headline = st.text_area("Headline", "A Lifetime of Cover, for a Lifetime of Love", height=70)
-        body = st.text_area("Body", "", height=70)
-        bullets_raw = st.text_area("Bullets (one per line — replaces body)", "", height=70)
-        cta = st.text_input("Call to action", "")
-        if st.button("Generate draft", type="primary"):
-            st.session_state["spec"] = new_post(
-                headline, body, tuple(l for l in bullets_raw.splitlines() if l.strip()),
-                cta, category=category, fmt=fmt,
-                logo_image=spec.logo.image,
-                background_image=spec.background.image,
-                contact=spec.contact,
-            )
-            st.rerun()
-
-    st.divider()
-
-    # ----------------------------------------------------- Step 2: edit + preview
-    st.markdown('<div class="ps-step"><span class="num">2</span> Edit layers &amp; export</div>',
-                unsafe_allow_html=True)
-
-    left, right = st.columns([5, 6], gap="large")
+    left, right = st.columns([5, 6], gap="medium")
 
     with left:
-        with st.container(border=True):
-            with st.expander("🎨 Template style — palette & layout", expanded=False):
-                st.caption("Change any time — your text, logo and contact layers stay as they are.")
-                theme_choices = list(THEMES.keys())
-                new_theme = st.selectbox(
-                    "Colour palette", theme_choices,
-                    index=theme_choices.index(spec.theme) if spec.theme in theme_choices else 0,
-                    format_func=lambda k: THEMES[k].label, key="tpl_theme_pick",
-                )
-                layout_choices = list(TEMPLATE_LABELS.keys())
-                new_layout = st.selectbox(
-                    "Layout", layout_choices,
-                    index=layout_choices.index(spec.template) if spec.template in layout_choices else 0,
-                    format_func=lambda k: TEMPLATE_LABELS[k], key="tpl_layout_pick",
-                )
-                if new_theme != spec.theme or new_layout != spec.template:
-                    spec.theme = new_theme
-                    spec.template = new_layout
-                    st.rerun()
+        st.subheader("Custom Color & Theme Controls")
+        theme_pick = st.selectbox("Color Palette", list(THEMES.keys()), index=list(THEMES.keys()).index(spec.theme))
+        spec.theme = theme_pick
 
-            st.markdown("**Edit a layer**")
-            options = ["— Background photo —", "— Logo —", "— Contact info —"] + \
-                      [f"{t.label}" for t in spec.text_layers]
-            ids = [None, "__logo__", "__contact__"] + [t.id for t in spec.text_layers]
-            default_idx = 3 if spec.text_layers else 0
-            choice = st.selectbox("Layer", range(len(options)), format_func=lambda i: options[i],
-                                  index=default_idx)
-            selected = ids[choice]
+        if spec.theme == "custom":
+            st.caption("Customize exact scheme colors below:")
+            if not spec.custom_palette:
+                spec.custom_palette = Palette("custom", "Custom", (30,30,30), (50,50,60), (255,100,100), (255,255,255), (200,200,200), (255,255,255), (255,100,100), (255,255,255), (240,240,240), (20,20,20))
+            cp1, cp2, cp3 = st.columns(3)
+            bg = _from_hex(cp1.color_picker("Background", _hex(spec.custom_palette.bg)))
+            card = _from_hex(cp2.color_picker("Card Panel", _hex(spec.custom_palette.card)))
+            ink = _from_hex(cp3.color_picker("Text Color", _hex(spec.custom_palette.ink)))
+            spec.custom_palette = Palette("custom", "Custom", bg, card, spec.custom_palette.peek, ink, spec.custom_palette.ink_muted, ink, card, bg, card, ink)
 
-            if st.button("+ Add text box"):
-                new_layer = TextLayer(text="New text", x=0.1, y=0.1, w=0.5, kind="custom", label="Custom text",
-                                      style=TextStyle(family="display", size=32,
-                                                      color=THEMES[spec.theme].ink))
-                spec.text_layers.append(new_layer)
-                st.rerun()
+        spec.template = st.selectbox("Vector Template Layout", list(TEMPLATE_LABELS.keys()), index=list(TEMPLATE_LABELS.keys()).index(spec.template))
 
-            st.divider()
-
-            if selected is None:
-                st.markdown("**Background photo**")
-                up = st.file_uploader("Upload custom photo", type=["jpg", "jpeg", "png", "webp"], key="bg_up")
-                if up is not None:
-                    spec.background.image = Image.open(up).convert("RGB")
-                if spec.background.image is not None:
-                    fc = st.columns(3)
-                    spec.background.focus_x = fc[0].slider("Focus X", 0.0, 1.0, spec.background.focus_x, 0.01)
-                    spec.background.focus_y = fc[1].slider("Focus Y", 0.0, 1.0, spec.background.focus_y, 0.01)
-                    spec.background.zoom = fc[2].slider("Zoom", 1.0, 2.0, spec.background.zoom, 0.05)
-                    if st.button("Remove photo"):
-                        spec.background.image = None
-                        st.rerun()
-                else:
-                    st.caption("No photo set — the template's flat background is used.")
-
-            elif selected == "__logo__":
-                st.markdown("**Logo**")
-                st.caption("A default placeholder logo is shown until you upload one.")
-                up = st.file_uploader("Replace logo (PNG, transparent background works best)",
-                                      type=["png", "jpg", "jpeg"], key="logo_up")
-                if up is not None:
-                    spec.logo.image = Image.open(up).convert("RGBA")
-                    spec.logo.is_default = False
-                if not spec.logo.is_default and st.button("Revert to default logo"):
-                    spec.logo.image = None
-                    spec.logo.is_default = True
-                    st.rerun()
-                lc = st.columns(3)
-                spec.logo.x = lc[0].slider("X", 0.0, 0.9, spec.logo.x, 0.01)
-                spec.logo.y = lc[1].slider("Y", 0.0, 0.9, spec.logo.y, 0.01)
-                spec.logo.w = lc[2].slider("Size", 0.04, 0.4, spec.logo.w, 0.01)
-                spec.logo.visible = st.checkbox("Visible", spec.logo.visible)
-
-            elif selected == "__contact__":
-                st.markdown("**Contact info**")
-                spec.contact.phone = st.text_input("Phone", spec.contact.phone)
-                spec.contact.show_phone = st.checkbox("Show phone", spec.contact.show_phone)
-                spec.contact.email = st.text_input("Email", spec.contact.email)
-                spec.contact.show_email = st.checkbox("Show email", spec.contact.show_email)
-                spec.contact.website = st.text_input("Website", spec.contact.website)
-                spec.contact.show_website = st.checkbox("Show website", spec.contact.show_website)
-                spec.contact.color = _color_picker(st, "Text colour", spec.contact.color, "contact_color")
-
-            else:
-                layer = spec.layer(selected)
-                if layer is not None:
-                    st.markdown(f"**{layer.label}**")
-                    _layer_controls(st, spec, layer)
+        st.subheader("Edit Slide Text Layers")
+        for i, layer in enumerate(spec.text_layers):
+            with st.expander(f"Layer: {layer.label}", expanded=(i == 0)):
+                layer.text = st.text_area("Content", layer.text, key=f"t_{active_idx}_{layer.id}")
+                l1, l2, l3 = st.columns(3)
+                layer.style.size = l1.slider("Size", 12, 100, layer.style.size, key=f"s_{active_idx}_{layer.id}")
+                layer.x = l2.slider("Position X", 0.0, 0.9, layer.x, 0.01, key=f"x_{active_idx}_{layer.id}")
+                layer.y = l3.slider("Position Y", 0.0, 0.9, layer.y, 0.01, key=f"y_{active_idx}_{layer.id}")
 
     with right:
-        with st.container(border=True):
-            st.markdown("**Live preview**")
-            image = render(spec)
+        st.subheader("Live Canvas Output")
+        img = render(spec)
+        st.image(img, use_container_width=True)
 
-            positionable = None  # the thing a canvas click should move, if anything
-            if selected == "__logo__":
-                positionable = spec.logo
-            elif selected not in (None, "__contact__"):
-                positionable = spec.layer(selected)
+        st.subheader("Export & Download Options")
+        d1, d2, d3 = st.columns(3)
 
-            if _img_coords is not None and positionable is not None:
-                st.caption("📍 Click anywhere on the image to move the selected layer there.")
-                click = _img_coords(image, key=f"canvas_click_{selected}")
-                if click is not None:
-                    last_key = f"_last_canvas_click_{selected}"
-                    current = (click["x"], click["y"])
-                    if st.session_state.get(last_key) != current:
-                        st.session_state[last_key] = current
-                        max_x = 0.9 if isinstance(positionable, ImageLayer) else 0.95
-                        max_y = max_x
-                        positionable.x = max(0.0, min(max_x, click["x"] / image.width))
-                        positionable.y = max(0.0, min(max_y, click["y"] / image.height))
-                        st.rerun()
-            else:
-                st.image(image, use_container_width=True)
-                if positionable is not None and _img_coords is None:
-                    st.caption(
-                        "💡 `pip install streamlit-image-coordinates` to click directly on the "
-                        "image and reposition the selected layer there, instead of only the "
-                        "X/Y sliders below."
-                    )
+        # Single Image
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        d1.download_button("⬇Download Slide (PNG)", buf.getvalue(), file_name=f"slide_{active_idx+1}.png", mime="image/png")
 
-            buf = io.BytesIO()
-            image.save(buf, format="PNG")
-            st.download_button("⬇ Download PNG", buf.getvalue(),
-                               file_name=f"{spec.category}-{spec.template}.png", mime="image/png")
+        # Carousel ZIP
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w") as zf:
+            for idx, slide_img in enumerate(render_carousel(car)):
+                s_buf = io.BytesIO()
+                slide_img.save(s_buf, format="PNG")
+                zf.writestr(f"slide_{idx+1}.png", s_buf.getvalue())
+        d2.download_button("Download Carousel (ZIP)", zip_buf.getvalue(), file_name="carousel.zip", mime="application/zip")
 
-
-def _sample_gallery_ui(st, spec: "PostSpec") -> None:
-    """The 'open a sample as an editable template' panel. Separated out of
-    post_studio_ui so the gallery's own state/errors can't take the rest of
-    the editor down with it."""
-    try:
-        sample_assets = get_sample_designs()
-    except Exception as exc:
-        st.error(f"Could not scan for sample designs: {exc}")
-        return
-
-    if not sample_assets:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        ref_dir = os.path.join(base_dir, "sample_design_references")
-        st.info(
-            "No sample templates found. This gallery looks for image files inside category "
-            f"subfolders of:\n\n`{ref_dir}`\n\n"
-            "Add e.g. `sample_design_references/Protection/example.webp` and reload the page. "
-            "In the meantime, use **Start from scratch** to build a post."
-        )
-        return
-
-    st.caption("Pick a sample, then open it as a fully editable, blank-panel template.")
-
-    categories_found = sorted({a["category"] for a in sample_assets})
-    image_assets = [a for a in sample_assets if a["is_image"]]
-
-    fcol, pcol = st.columns([1, 2])
-    sel_cat = fcol.selectbox("Category", ["All"] + categories_found, key="ref_gallery_cat")
-    filtered_imgs = [a for a in image_assets if sel_cat == "All" or a["category"] == sel_cat]
-
-    if not filtered_imgs:
-        st.warning(f"No sample templates found for category '{sel_cat}'.")
-        return
-
-    # NOTE: the widget key is scoped to the current category filter. Without
-    # this, switching the category shrinks the options list while the old
-    # selection index/value persists in session state, and Streamlit raises
-    # "value is not part of the options" — this was why the gallery broke.
-    chosen_img = pcol.selectbox(
-        "Template",
-        filtered_imgs,
-        format_func=lambda a: a["label"],
-        key=f"ref_gallery_img_asset__{sel_cat}",
-    )
-
-    with st.container(border=True):
-        c1, c2 = st.columns([3, 2], gap="medium")
-        with c1:
-            try:
-                st.image(chosen_img["path"], use_container_width=True)
-            except Exception as exc:
-                st.warning(f"Couldn't preview this file ({exc}). You can still open it as a template.")
-            st.caption("Inspiration only — opening it builds a fresh, fully editable post.")
-
-        with c2:
-            theme_choices = list(THEMES.keys())
-            default_theme_preset = CATEGORY_PRESETS.get(chosen_img["category"], {}).get("theme", "periwinkle")
-            default_theme_idx = theme_choices.index(default_theme_preset) if default_theme_preset in theme_choices else 0
-            chosen_theme = st.selectbox(
-                "Colour palette", theme_choices, index=default_theme_idx,
-                format_func=lambda k: THEMES[k].label, key="gallery_theme_pick",
-            )
-            layout_choices = list(TEMPLATE_LABELS.keys())
-            card_layouts = [k for k in layout_choices if k != "banner"]
-            chosen_layout = st.selectbox(
-                "Layout", card_layouts,
-                format_func=lambda k: TEMPLATE_LABELS[k], key="gallery_layout_pick",
-            )
-            use_ref_photo = st.checkbox(
-                "Use sample image as background photo",
-                value=False,
-                # Scoped to the chosen file: switching samples always resets this to
-                # unticked, instead of silently carrying an earlier "yes" forward onto
-                # a template the person never meant it for.
-                key=f"gallery_use_ref_photo__{chosen_img['path']}",
-                help="These sample files are finished graphics with their own text baked in, "
-                     "not plain photos — leave unticked for a clean, fully editable result.",
-            )
-            if use_ref_photo:
-                st.caption("⚠️ The sample's own text/photos may show through your card edges.")
-
-            if st.button("✏️ Open as Editable Template", key="btn_open_editable_template", type="primary",
-                        use_container_width=True):
-                try:
-                    st.session_state["spec"] = build_sample_template_spec(
-                        chosen_img,
-                        brand_name="LOGO",
-                        contact=spec.contact,
-                        theme_key=chosen_theme,
-                        template_key=chosen_layout,
-                        use_reference_image=use_ref_photo,
-                    )
-                except Exception as exc:
-                    st.error(f"Could not open this template: {exc}")
-                else:
-                    st.rerun()
-
+        # Video Reel Export
+        reel_bytes = export_reel_video(car.slides)
+        ext = "mp4" if HAS_IMAGEIO else "gif"
+        d3.download_button(f"🎥 Export Reel ({ext.upper()})", reel_bytes, file_name=f"reel.{ext}", mime=f"video/{ext}")
 
 if __name__ == "__main__":
-    render(new_post(
-        "A Lifetime of Cover, for a Lifetime of Love",
-        "Whole of Life insurance offers fixed protection, helping ensure loved ones "
-        "are taken care of no matter when it's needed.",
-        category="Protection",
-    )).save("demo.png")
-    print("wrote demo.png")
+    post_studio_ui()
