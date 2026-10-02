@@ -3,7 +3,7 @@ post_studio.py
 ==============
 
 A social-post, carousel, and short reel generator/editor built on Pillow, Streamlit, and ImageIO.
-All template graphics are fully customizable vector shapes—no static non-editable PNG templates.
+All template graphics are fully customizable vector shapes with native logo and picture overlay support.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# Dynamic Custom Color Palettes & Custom Schemes
+# Dynamic Custom Color Palettes & Custom Color Bar
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -82,7 +82,32 @@ THEMES: dict[str, Palette] = {
         ink=(18, 40, 28), ink_muted=(70, 90, 78), on_bg=(255, 255, 255),
         cta_bg=(18, 53, 36), cta_ink=(240, 235, 210),
         pale=(240, 245, 242), pale_ink=(18, 53, 36)),
-    "custom": Palette("custom", "Custom Palette",
+    "neon_cyber": Palette("neon_cyber", "Cyberpunk / Neon Cyan",
+        bg=(15, 15, 26), card=(30, 30, 50), peek=(0, 242, 254),
+        ink=(255, 255, 255), ink_muted=(180, 190, 210), on_bg=(255, 255, 255),
+        cta_bg=(0, 242, 254), cta_ink=(15, 15, 26),
+        pale=(40, 40, 70), pale_ink=(0, 242, 254)),
+    "sunset_glow": Palette("sunset_glow", "Sunset / Orange Amber",
+        bg=(45, 20, 35), card=(255, 107, 107), peek=(255, 217, 61),
+        ink=(255, 255, 255), ink_muted=(255, 220, 210), on_bg=(255, 255, 255),
+        cta_bg=(255, 217, 61), cta_ink=(45, 20, 35),
+        pale=(70, 30, 50), pale_ink=(255, 217, 61)),
+    "pastel_dream": Palette("pastel_dream", "Pastel Violet / Soft Pink",
+        bg=(230, 224, 248), card=(255, 255, 255), peek=(247, 186, 207),
+        ink=(40, 35, 60), ink_muted=(100, 90, 120), on_bg=(40, 35, 60),
+        cta_bg=(247, 186, 207), cta_ink=(40, 35, 60),
+        pale=(240, 235, 252), pale_ink=(40, 35, 60)),
+    "monochrome": Palette("monochrome", "Monochrome Studio",
+        bg=(20, 20, 20), card=(40, 40, 40), peek=(100, 100, 100),
+        ink=(255, 255, 255), ink_muted=(180, 180, 180), on_bg=(255, 255, 255),
+        cta_bg=(255, 255, 255), cta_ink=(20, 20, 20),
+        pale=(60, 60, 60), pale_ink=(255, 255, 255)),
+    "nordic_frost": Palette("nordic_frost", "Nordic Frost / Slate",
+        bg=(216, 226, 236), card=(30, 41, 59), peek=(56, 189, 248),
+        ink=(255, 255, 255), ink_muted=(203, 213, 225), on_bg=(30, 41, 59),
+        cta_bg=(56, 189, 248), cta_ink=(30, 41, 59),
+        pale=(241, 245, 249), pale_ink=(30, 41, 59)),
+    "custom": Palette("custom", "Custom Palette Bar",
         bg=(25, 25, 30), card=(45, 45, 55), peek=(255, 105, 180),
         ink=(255, 255, 255), ink_muted=(200, 200, 210), on_bg=(255, 255, 255),
         cta_bg=(255, 105, 180), cta_ink=(255, 255, 255),
@@ -176,10 +201,10 @@ def _hex(c: RGB) -> str:
 
 def cover_crop(img: Image.Image, size: tuple[int, int], focus: tuple[float, float] = (0.5, 0.5), zoom: float = 1.0) -> Image.Image:
     w, h = max(1, int(size[0])), max(1, int(size[1]))
-    fitted = ImageOps.fit(img.convert("RGB"), (w, h), method=Image.Resampling.LANCZOS, centering=focus)
+    fitted = ImageOps.fit(img.convert("RGBA"), (w, h), method=Image.Resampling.LANCZOS, centering=focus)
     if zoom > 1.001:
         zw, zh = int(w * zoom), int(h * zoom)
-        big = ImageOps.fit(img.convert("RGB"), (zw, zh), method=Image.Resampling.LANCZOS, centering=focus)
+        big = ImageOps.fit(img.convert("RGBA"), (zw, zh), method=Image.Resampling.LANCZOS, centering=focus)
         x0 = (zw - w) // 2
         y0 = (zh - h) // 2
         fitted = big.crop((x0, y0, x0 + w, y0 + h))
@@ -234,16 +259,15 @@ class ImageLayer:
     image: Image.Image | None = None
     x: float = 0.055
     y: float = 0.055
-    w: float = 0.14
+    w: float = 0.15
     visible: bool = True
-    is_default: bool = True
 
 @dataclass
 class BackgroundLayer:
     image: Image.Image | None = None
     box: Box = (0.0, 0.0, 1.0, 1.0)
     focus_x: float = 0.5
-    focus_y: float = 0.42
+    focus_y: float = 0.5
     zoom: float = 1.0
     tint: RGB | None = None
 
@@ -265,6 +289,7 @@ class PostSpec:
     custom_palette: Palette | None = None
     fmt: str = "square"
     background: BackgroundLayer = field(default_factory=BackgroundLayer)
+    picture_overlay: BackgroundLayer = field(default_factory=BackgroundLayer)
     logo: ImageLayer = field(default_factory=ImageLayer)
     text_layers: list[TextLayer] = field(default_factory=list)
     contact: ContactInfo = field(default_factory=ContactInfo)
@@ -305,11 +330,14 @@ class Canvas:
     def fy(self, t: float) -> float:
         return self.h * t
 
-    def rect(self, box: Box, fill: RGB, radius: float = 0) -> None:
+    def rect(self, box: Box, fill: RGB, radius: float = 0, alpha: int = 255) -> None:
         if radius:
-            self.draw.rounded_rectangle(box, radius=radius, fill=(*fill, 255))
+            self.draw.rounded_rectangle(box, radius=radius, fill=(*fill, alpha))
         else:
-            self.draw.rectangle(box, fill=(*fill, 255))
+            self.draw.rectangle(box, fill=(*fill, alpha))
+
+    def polygon(self, points: list[tuple[float, float]], fill: RGB, alpha: int = 255) -> None:
+        self.draw.polygon(points, fill=(*fill, alpha))
 
     def result(self) -> Image.Image:
         return self.img.convert("RGB")
@@ -354,12 +382,47 @@ def _paint_banner(c: Canvas, pal: Palette) -> Geometry:
     c.rect(band, pal.card)
     return Geometry((0.08, 0.18, 0.84, 0.38), (0.0, 0.0, 1.0, 1.0), pal.ink, pal.ink_muted, pal.on_bg, 0.938, (0.055, 0.90))
 
+def _paint_glassmorphism(c: Canvas, pal: Palette) -> Geometry:
+    c.rect((0, 0, c.w, c.h), pal.bg)
+    c.draw.ellipse((c.fx(0.05), c.fy(0.05), c.fx(0.55), c.fy(0.55)), fill=(*pal.peek, 180))
+    c.draw.ellipse((c.fx(0.45), c.fy(0.45), c.fx(0.95), c.fy(0.95)), fill=(*pal.cta_bg, 160))
+    card: Box = (c.fx(0.10), c.fy(0.12), c.fx(0.90), c.fy(0.88))
+    c.rect(card, pal.card, radius=24, alpha=220)
+    return Geometry((0.15, 0.18, 0.70, 0.60), None, pal.ink, pal.ink_muted, pal.on_bg, 0.92, (0.08, 0.05))
+
+def _paint_geometric_diag(c: Canvas, pal: Palette) -> Geometry:
+    c.polygon([(0, 0), (c.w, 0), (c.w, c.fy(0.45)), (0, c.fy(0.70))], pal.peek)
+    c.polygon([(0, c.fy(0.20)), (c.w, c.fy(0.05)), (c.w, c.h), (0, c.h)], pal.card)
+    return Geometry((0.08, 0.25, 0.80, 0.60), None, pal.ink, pal.ink_muted, pal.on_bg, 0.93, (0.05, 0.05))
+
+def _paint_minimal_frame(c: Canvas, pal: Palette) -> Geometry:
+    c.rect((0, 0, c.w, c.h), pal.bg)
+    frame: Box = (c.fx(0.06), c.fy(0.06), c.fx(0.94), c.fy(0.94))
+    c.draw.rectangle(frame, outline=(*pal.peek, 255), width=int(c.s(8)))
+    return Geometry((0.10, 0.12, 0.80, 0.70), None, pal.ink, pal.ink_muted, pal.on_bg, 0.92, (0.08, 0.08))
+
+def _paint_split_diagonal(c: Canvas, pal: Palette) -> Geometry:
+    c.polygon([(0, 0), (c.w, 0), (0, c.h)], pal.bg)
+    c.polygon([(c.w, 0), (c.w, c.h), (0, c.h)], pal.card)
+    return Geometry((0.10, 0.15, 0.75, 0.65), None, pal.ink, pal.ink_muted, pal.on_bg, 0.92, (0.05, 0.05))
+
+def _paint_floating_card(c: Canvas, pal: Palette) -> Geometry:
+    c.rect((0, 0, c.w, c.h), pal.bg)
+    c.rect((c.fx(0.12), c.fy(0.18), c.fx(0.92), c.fy(0.86)), pal.peek, radius=20)
+    c.rect((c.fx(0.08), c.fy(0.14), c.fx(0.88), c.fy(0.82)), pal.card, radius=20)
+    return Geometry((0.12, 0.18, 0.72, 0.58), None, pal.ink, pal.ink_muted, pal.on_bg, 0.90, (0.08, 0.05))
+
 _PAINTERS: dict[str, Callable[[Canvas, Palette], Geometry]] = {
     "offset_card": _paint_offset_card,
     "card_photo": _paint_card_photo,
     "photo_side": _paint_photo_side,
     "arc": _paint_arc,
     "banner": _paint_banner,
+    "glassmorphism": _paint_glassmorphism,
+    "geometric_diag": _paint_geometric_diag,
+    "minimal_frame": _paint_minimal_frame,
+    "split_diagonal": _paint_split_diagonal,
+    "floating_card": _paint_floating_card,
 }
 
 TEMPLATES = _PAINTERS
@@ -368,7 +431,12 @@ TEMPLATE_LABELS = {
     "card_photo": "Card & Photo — Clear headline card with photo base",
     "photo_side": "Split Photo Side — Clean typography card beside image field",
     "arc": "Arc Vector — Circular geometric background vector cut",
-    "banner": "Translucent Banner — Text banner standard layout"
+    "banner": "Translucent Banner — Text banner standard layout",
+    "glassmorphism": "Glassmorphism — Translucent frosted card with glowing accents",
+    "geometric_diag": "Geometric Diag — Sharp dynamic diagonal vector panels",
+    "minimal_frame": "Minimal Frame — Clean bordered elegant layout",
+    "split_diagonal": "Split Diagonal — Two-tone diagonal dual color split",
+    "floating_card": "Floating Card — Rounded shadow floating stacked cards"
 }
 
 def draw_text_layer(c: Canvas, layer: TextLayer) -> None:
@@ -380,7 +448,6 @@ def draw_text_layer(c: Canvas, layer: TextLayer) -> None:
     f = _load_ttf(path, size_px)
     max_w = max(c.s(40), c.fx(layer.w))
 
-    # Custom simple text render
     words = layer.text.split()
     lines, curr = [], ""
     for w in words:
@@ -413,19 +480,26 @@ def render(spec: PostSpec) -> Image.Image:
     c = Canvas(size, pal)
     geo = _PAINTERS.get(spec.template, _paint_offset_card)(c, pal)
 
+    # Background Picture Overlay
     if spec.background.image is not None:
         box = (c.fx(spec.background.box[0]), c.fy(spec.background.box[1]), c.fx(spec.background.box[2]), c.fy(spec.background.box[3]))
         panel = cover_crop(spec.background.image, (int(box[2] - box[0]), int(box[3] - box[1])), (spec.background.focus_x, spec.background.focus_y), spec.background.zoom)
-        c.img.paste(panel, (int(box[0]), int(box[1])))
+        c.img.paste(panel, (int(box[0]), int(box[1])), panel if panel.mode == "RGBA" else None)
+
+    # Additional Template Picture Overlay
+    if spec.picture_overlay.image is not None:
+        p_box = (c.fx(spec.picture_overlay.box[0]), c.fy(spec.picture_overlay.box[1]), c.fx(spec.picture_overlay.box[2]), c.fy(spec.picture_overlay.box[3]))
+        p_panel = cover_crop(spec.picture_overlay.image, (int(p_box[2] - p_box[0]), int(p_box[3] - p_box[1])), (spec.picture_overlay.focus_x, spec.picture_overlay.focus_y), spec.picture_overlay.zoom)
+        c.img.paste(p_panel, (int(p_box[0]), int(p_box[1])), p_panel if p_panel.mode == "RGBA" else None)
 
     for tl in spec.text_layers:
         draw_text_layer(c, tl)
 
-    # Draw logo placeholder/uploaded logo
+    # Dynamic Logo Overlay
     if spec.logo.visible:
         logo_img = spec.logo.image or default_logo("STUDIO", pal)
         lw = int(c.fx(spec.logo.w))
-        lh = int(logo_img.height * (lw / logo_img.width))
+        lh = int(logo_img.height * (lw / max(1, logo_img.width)))
         resized = logo_img.resize((lw, max(1, lh)), Image.Resampling.LANCZOS)
         c.img.paste(resized, (int(c.fx(spec.logo.x)), int(c.fy(spec.logo.y))), resized if resized.mode == "RGBA" else None)
 
@@ -454,14 +528,13 @@ def build_post_canvas(
     contact_text: str = "hello@adviser.co.uk • 020 0000 0000 • adviser.co.uk",
     background_path: str | None = None,
 ) -> Image.Image:
-    """Keep the original canvas API available to the app and legacy callers."""
+    """Preserve the original canvas API for the app and legacy callers."""
     theme = {"gold": "mustard", "navy": "royal", "green": "emerald",
              "purple": "periwinkle", "teal": "emerald"}.get(accent.lower(), "periwinkle")
     category = category if category in CATEGORY_PRESETS else "Protection"
     template = "photo_side" if background_path else "offset_card"
     spec = new_post(headline, body, category=category, template=template, theme=theme)
     spec.logo.image = default_logo(logo_text, spec.get_palette())
-    spec.logo.is_default = False
     if background_path:
         try:
             with Image.open(background_path) as background:
@@ -479,7 +552,6 @@ def render_carousel(carousel: CarouselSpec) -> list[Image.Image]:
     return [render(slide) for slide in carousel.slides]
 
 def export_reel_video(slides: list[PostSpec], fps: int = 2) -> bytes:
-    """Renders carousel slides into an animated video or GIF reel bytes."""
     images = [render(s) for s in slides]
     buf = io.BytesIO()
     if HAS_IMAGEIO:
@@ -496,16 +568,15 @@ def export_reel_video(slides: list[PostSpec], fps: int = 2) -> bytes:
 
 def post_studio_ui() -> None:
     import streamlit as st
-    st.set_page_config(layout="wide", page_title="Post & Reel Studio")
-    st.title("Customizable Post, Reel & Carousel Studio")
+    st.set_page_config(layout="wide", page_title="Post, Reel & Vector Studio")
+    st.title("🖌️ Customizable Post, Reel & Vector Studio")
 
     if "carousel" not in st.session_state:
-        st.session_state["carousel"] = CarouselSpec(slides=[new_post("Customizable Social Posts", "Design reels, carousels, and square posts effortlessly with dynamic vector themes.", "Swipe Left ➔")])
+        st.session_state["carousel"] = CarouselSpec(slides=[new_post("Customizable Vector Posts", "Design reels, carousels, and square posts with logos, pictures, and full custom color controls.", "Get Started ➔")])
 
     car: CarouselSpec = st.session_state["carousel"]
 
-    # Carousel Management Bar
-    st.subheader("Slide & Format Settings")
+    st.subheader("📸 Slide & Layout Settings")
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
 
     active_idx = c1.number_input("Active Slide", min_value=1, max_value=len(car.slides), value=car.active_index + 1) - 1
@@ -515,10 +586,10 @@ def post_studio_ui() -> None:
     spec.fmt = c2.selectbox("Canvas Format", list(FORMATS.keys()), index=list(FORMATS.keys()).index(spec.fmt))
 
     if c3.button("➕ Add Slide"):
-        car.slides.append(new_post(f"Slide {len(car.slides)+1} Title", "Content text goes here."))
+        car.slides.append(new_post(f"Slide {len(car.slides)+1} Title", "Add your slide content and customization here."))
         st.rerun()
 
-    if c4.button("Delete Slide") and len(car.slides) > 1:
+    if c4.button("🗑 Delete Slide") and len(car.slides) > 1:
         car.slides.pop(active_idx)
         car.active_index = max(0, active_idx - 1)
         st.rerun()
@@ -526,23 +597,55 @@ def post_studio_ui() -> None:
     left, right = st.columns([5, 6], gap="medium")
 
     with left:
-        st.subheader("Custom Color & Theme Controls")
-        theme_pick = st.selectbox("Color Palette", list(THEMES.keys()), index=list(THEMES.keys()).index(spec.theme))
+        st.subheader("🎨 Custom Color Palette & Bar")
+        theme_pick = st.selectbox("Palette Preset", list(THEMES.keys()), index=list(THEMES.keys()).index(spec.theme))
         spec.theme = theme_pick
 
-        if spec.theme == "custom":
-            st.caption("Customize exact scheme colors below:")
+        if spec.theme == "custom" or st.checkbox("Show Custom Color Bar Pickers", value=(spec.theme == "custom")):
+            st.markdown("#### 🎛️ Custom Color Bar")
             if not spec.custom_palette:
-                spec.custom_palette = Palette("custom", "Custom", (30,30,30), (50,50,60), (255,100,100), (255,255,255), (200,200,200), (255,255,255), (255,100,100), (255,255,255), (240,240,240), (20,20,20))
-            cp1, cp2, cp3 = st.columns(3)
+                spec.custom_palette = Palette("custom", "Custom Palette Bar", (25, 25, 30), (45, 45, 55), (255, 105, 180), (255, 255, 255), (200, 200, 210), (255, 255, 255), (255, 105, 180), (255, 255, 255), (240, 240, 245), (20, 20, 30))
+
+            cp1, cp2, cp3, cp4 = st.columns(4)
             bg = _from_hex(cp1.color_picker("Background", _hex(spec.custom_palette.bg)))
             card = _from_hex(cp2.color_picker("Card Panel", _hex(spec.custom_palette.card)))
-            ink = _from_hex(cp3.color_picker("Text Color", _hex(spec.custom_palette.ink)))
-            spec.custom_palette = Palette("custom", "Custom", bg, card, spec.custom_palette.peek, ink, spec.custom_palette.ink_muted, ink, card, bg, card, ink)
+            peek = _from_hex(cp3.color_picker("Accent / Peek", _hex(spec.custom_palette.peek)))
+            ink = _from_hex(cp4.color_picker("Primary Text", _hex(spec.custom_palette.ink)))
+
+            cp5, cp6 = st.columns(2)
+            cta_bg = _from_hex(cp5.color_picker("Button / Highlight", _hex(spec.custom_palette.cta_bg)))
+            ink_muted = _from_hex(cp6.color_picker("Muted Text", _hex(spec.custom_palette.ink_muted)))
+
+            spec.custom_palette = Palette("custom", "Custom Palette Bar", bg, card, peek, ink, ink_muted, ink, cta_bg, bg, card, ink)
+            spec.theme = "custom"
 
         spec.template = st.selectbox("Vector Template Layout", list(TEMPLATE_LABELS.keys()), index=list(TEMPLATE_LABELS.keys()).index(spec.template))
 
-        st.subheader("Edit Slide Text Layers")
+        st.subheader("🖼️ Upload Logo & Overlay Pictures")
+        with st.expander("🏷️ Logo Settings & Upload", expanded=True):
+            spec.logo.visible = st.checkbox("Show Logo", value=spec.logo.visible)
+            logo_file = st.file_uploader("Upload Custom Logo Image", type=["png", "jpg", "jpeg", "webp"], key=f"logo_up_{active_idx}")
+            if logo_file:
+                spec.logo.image = Image.open(logo_file).convert("RGBA")
+
+            l1, l2, l3 = st.columns(3)
+            spec.logo.x = l1.slider("Logo X", 0.0, 0.9, spec.logo.x, 0.01, key=f"lx_{active_idx}")
+            spec.logo.y = l2.slider("Logo Y", 0.0, 0.9, spec.logo.y, 0.01, key=f"ly_{active_idx}")
+            spec.logo.w = l3.slider("Logo Width", 0.05, 0.5, spec.logo.w, 0.01, key=f"lw_{active_idx}")
+
+        with st.expander("🖼️ Additional Picture Overlay", expanded=False):
+            pic_file = st.file_uploader("Upload Overlay Picture", type=["png", "jpg", "jpeg", "webp"], key=f"pic_up_{active_idx}")
+            if pic_file:
+                spec.picture_overlay.image = Image.open(pic_file).convert("RGBA")
+
+            p1, p2, p3, p4 = st.columns(4)
+            x0 = p1.slider("Box Left", 0.0, 0.9, spec.picture_overlay.box[0], 0.01, key=f"px1_{active_idx}")
+            y0 = p2.slider("Box Top", 0.0, 0.9, spec.picture_overlay.box[1], 0.01, key=f"py1_{active_idx}")
+            x1 = p3.slider("Box Right", 0.1, 1.0, spec.picture_overlay.box[2], 0.01, key=f"px2_{active_idx}")
+            y1 = p4.slider("Box Bottom", 0.1, 1.0, spec.picture_overlay.box[3], 0.01, key=f"py2_{active_idx}")
+            spec.picture_overlay.box = (x0, y0, x1, y1)
+
+        st.subheader("📝 Edit Slide Text Layers")
         for i, layer in enumerate(spec.text_layers):
             with st.expander(f"Layer: {layer.label}", expanded=(i == 0)):
                 layer.text = st.text_area("Content", layer.text, key=f"t_{active_idx}_{layer.id}")
@@ -552,28 +655,25 @@ def post_studio_ui() -> None:
                 layer.y = l3.slider("Position Y", 0.0, 0.9, layer.y, 0.01, key=f"y_{active_idx}_{layer.id}")
 
     with right:
-        st.subheader("Live Canvas Output")
+        st.subheader("🖼️️ Live Canvas Output")
         img = render(spec)
         st.image(img, use_container_width=True)
 
-        st.subheader("Export & Download Options")
+        st.subheader("📥 Export & Download Options")
         d1, d2, d3 = st.columns(3)
 
-        # Single Image
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        d1.download_button("⬇Download Slide (PNG)", buf.getvalue(), file_name=f"slide_{active_idx+1}.png", mime="image/png")
+        d1.download_button("⬇️ Download Slide (PNG)", buf.getvalue(), file_name=f"slide_{active_idx+1}.png", mime="image/png")
 
-        # Carousel ZIP
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w") as zf:
             for idx, slide_img in enumerate(render_carousel(car)):
                 s_buf = io.BytesIO()
                 slide_img.save(s_buf, format="PNG")
                 zf.writestr(f"slide_{idx+1}.png", s_buf.getvalue())
-        d2.download_button("Download Carousel (ZIP)", zip_buf.getvalue(), file_name="carousel.zip", mime="application/zip")
+        d2.download_button("📦 Download Carousel (ZIP)", zip_buf.getvalue(), file_name="carousel.zip", mime="application/zip")
 
-        # Video Reel Export
         reel_bytes = export_reel_video(car.slides)
         ext = "mp4" if HAS_IMAGEIO else "gif"
         d3.download_button(f"🎥 Export Reel ({ext.upper()})", reel_bytes, file_name=f"reel.{ext}", mime=f"video/{ext}")
