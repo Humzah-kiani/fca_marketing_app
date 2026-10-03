@@ -8,6 +8,7 @@ All template graphics are fully customizable vector shapes with native logo and 
 
 from __future__ import annotations
 
+import copy
 import io
 import math
 import os
@@ -31,7 +32,7 @@ Box = tuple[float, float, float, float]
 
 __all__ = [
     "Palette", "TextStyle", "TextLayer", "ImageLayer", "BackgroundLayer",
-    "ContactInfo", "PostSpec", "SlideSpec", "CarouselSpec",
+    "ContactInfo", "PostSpec", "CarouselSpec",
     "THEMES", "FORMATS", "TEMPLATES", "TEMPLATE_LABELS", "CATEGORY_PRESETS",
     "FONT_FAMILIES", "new_post", "render", "default_logo", "build_post_canvas", "post_studio_ui",
     "render_carousel", "export_reel_video"
@@ -134,8 +135,16 @@ FONT_FAMILIES: dict[str, str] = {
     "display": "Poppins (sans)",
     "serif": "Lora (serif)",
     "body": "System sans",
+    "elegant_serif": "Playfair Display (elegant serif)",
+    "rounded": "Quicksand (rounded)",
+    "condensed": "Oswald (condensed)",
+    "mono": "JetBrains Mono (monospace)",
+    "handwritten": "Pacifico (script)",
 }
 
+# Every family resolves to *something* even on a bare-bones system — each
+# chain ends in a near-universal fallback (DejaVu / Liberation / the classic
+# Windows/Mac names) so picking an unusual font never silently breaks text.
 _FONT_STACKS: dict[tuple[str, str], Sequence[str]] = {
     ("display", "regular"): ("Poppins-Regular", "Inter-Regular", "LiberationSans-Regular", "DejaVuSans", "arial"),
     ("display", "bold"): ("Poppins-Bold", "Inter-Bold", "LiberationSans-Bold", "DejaVuSans-Bold", "arialbd"),
@@ -144,6 +153,16 @@ _FONT_STACKS: dict[tuple[str, str], Sequence[str]] = {
     ("serif", "bold"): ("Lora-Bold", "PlayfairDisplay-Bold", "DejaVuSerif-Bold", "georgiab"),
     ("body", "regular"): ("Inter-Regular", "LiberationSans-Regular", "DejaVuSans", "arial"),
     ("body", "bold"): ("Inter-Bold", "LiberationSans-Bold", "DejaVuSans-Bold", "arialbd"),
+    ("elegant_serif", "regular"): ("PlayfairDisplay-Regular", "Merriweather-Regular", "DejaVuSerif", "georgia"),
+    ("elegant_serif", "bold"): ("PlayfairDisplay-Bold", "Merriweather-Bold", "DejaVuSerif-Bold", "georgiab"),
+    ("rounded", "regular"): ("Quicksand-Regular", "Baloo2-Regular", "ComicNeue-Regular", "DejaVuSans", "arial"),
+    ("rounded", "bold"): ("Quicksand-Bold", "Baloo2-Bold", "ComicNeue-Bold", "DejaVuSans-Bold", "arialbd"),
+    ("condensed", "regular"): ("Oswald-Regular", "RobotoCondensed-Regular", "LiberationSansNarrow-Regular", "DejaVuSansCondensed", "DejaVuSans", "arial"),
+    ("condensed", "bold"): ("Oswald-Bold", "RobotoCondensed-Bold", "LiberationSansNarrow-Bold", "DejaVuSansCondensed-Bold", "DejaVuSans-Bold", "arialbd"),
+    ("mono", "regular"): ("JetBrainsMono-Regular", "RobotoMono-Regular", "DejaVuSansMono", "LiberationMono-Regular", "cour"),
+    ("mono", "bold"): ("JetBrainsMono-Bold", "RobotoMono-Bold", "DejaVuSansMono-Bold", "LiberationMono-Bold", "courbd"),
+    ("handwritten", "regular"): ("Pacifico-Regular", "DancingScript-Regular", "DejaVuSans-Oblique", "ariali"),
+    ("handwritten", "bold"): ("Pacifico-Regular", "DancingScript-Bold", "DejaVuSans-BoldOblique", "arialbi"),
 }
 
 FONT_DIRS = (
@@ -283,6 +302,7 @@ class ContactInfo:
 
 @dataclass
 class PostSpec:
+    name: str = ""
     category: str = "Protection"
     template: str = "offset_card"
     theme: str = "periwinkle"
@@ -439,11 +459,28 @@ TEMPLATE_LABELS = {
     "floating_card": "Floating Card — Rounded shadow floating stacked cards"
 }
 
+def _resolve_weight(family: str, bold: bool, italic: bool) -> str | None:
+    """Tries the exact style first, then degrades toward plain regular —
+    so toggling italic on a family with no italic file falls back to its
+    normal weight instead of the tiny default bitmap font."""
+    order = (
+        ["bold_italic", "italic", "bold", "regular"] if bold and italic else
+        ["italic", "regular"] if italic else
+        ["bold", "regular"] if bold else
+        ["regular"]
+    )
+    for weight in order:
+        path = _resolve(family, weight)
+        if path:
+            return path
+    return None
+
+
 def draw_text_layer(c: Canvas, layer: TextLayer) -> None:
     if not layer.visible or not layer.text.strip():
         return
     st = layer.style
-    path = _resolve(st.family, "bold" if st.bold else "regular")
+    path = _resolve_weight(st.family, st.bold, st.italic)
     size_px = max(8, int(c.s(st.size)))
     f = _load_ttf(path, size_px)
     max_w = max(c.s(40), c.fx(layer.w))
@@ -470,6 +507,9 @@ def draw_text_layer(c: Canvas, layer: TextLayer) -> None:
         if st.highlight:
             c.rect((lx - 4, y - 2, lx + tw + 4, y + size_px + 2), st.highlight_color)
         c.draw.text((lx, y), line, font=f, fill=(*st.color, 255))
+        if st.underline:
+            uy = y + size_px * 0.96
+            c.draw.line((lx, uy, lx + tw, uy), fill=(*st.color, 255), width=max(1, int(size_px * 0.055)))
         y += line_h
 
 def render(spec: PostSpec) -> Image.Image:
@@ -551,15 +591,60 @@ def build_post_canvas(
 def render_carousel(carousel: CarouselSpec) -> list[Image.Image]:
     return [render(slide) for slide in carousel.slides]
 
-def export_reel_video(slides: list[PostSpec], fps: int = 2) -> bytes:
-    images = [render(s) for s in slides]
+def _ken_burns_frame(img: Image.Image, t: float, max_zoom: float = 1.08) -> Image.Image:
+    """Progressively zooms into `img` as t goes 0 -> 1 (a basic Ken Burns pan/zoom)."""
+    w, h = img.size
+    zoom = 1.0 + (max_zoom - 1.0) * t
+    zw, zh = max(w, int(w * zoom)), max(h, int(h * zoom))
+    big = img.resize((zw, zh), Image.Resampling.LANCZOS)
+    x0, y0 = (zw - w) // 2, (zh - h) // 2
+    return big.crop((x0, y0, x0 + w, y0 + h))
+
+
+def export_reel_video(slides: list[PostSpec], duration: float = 18.0, fps: int = 15,
+                      animate: bool = True) -> bytes:
+    """Renders `slides` into one reel roughly `duration` seconds long (time is
+    split evenly across slides), with a subtle zoom per slide and a short
+    crossfade between slides when `animate` is True. Falls back to an
+    animated GIF if the optional `imageio` package isn't installed."""
+    if not slides:
+        raise ValueError("export_reel_video needs at least one slide.")
+    duration = max(1.0, float(duration))
+    fps = max(1, int(fps))
+    images = [render(s).convert("RGB") for s in slides]
+    n = len(images)
+
+    total_frames = max(n, int(round(duration * fps)))
+    per_slide = total_frames // n
+    counts = [per_slide] * n
+    counts[-1] += total_frames - per_slide * n  # give any remainder to the last slide
+
+    crossfade_n = min(fps // 2, per_slide // 3) if (animate and n > 1) else 0
+
+    frames: list[Image.Image] = []
+    for idx, (img, count) in enumerate(zip(images, counts)):
+        hold = max(1, count - crossfade_n if idx < n - 1 else count)
+        for f in range(hold):
+            t = f / max(1, hold - 1) if hold > 1 else 0.0
+            frames.append(_ken_burns_frame(img, t) if animate else img)
+        if crossfade_n and idx < n - 1:
+            start_frame = frames[-1]
+            next_img = images[idx + 1]
+            end_frame = next_img.resize(start_frame.size) if next_img.size != start_frame.size else next_img
+            for cf in range(1, crossfade_n + 1):
+                alpha = cf / (crossfade_n + 1)
+                frames.append(Image.blend(start_frame, end_frame, alpha))
+
     buf = io.BytesIO()
     if HAS_IMAGEIO:
         import numpy as np
-        frames = [np.array(img) for img in images]
-        imageio.mimsave(buf, frames, format="MP4", fps=fps)
+        arr = [np.asarray(f) for f in frames]
+        # macro_block_size=1 stops ffmpeg silently padding dimensions (e.g. 1080
+        # becomes 1088) to a multiple of 16 — exact size matters for reels.
+        imageio.mimsave(buf, arr, format="MP4", fps=fps, macro_block_size=1)
     else:
-        images[0].save(buf, format="GIF", save_all=True, append_images=images[1:], duration=int(1000/fps), loop=0)
+        frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:],
+                       duration=int(1000 / fps), loop=0)
     return buf.getvalue()
 
 # ---------------------------------------------------------------------------
@@ -576,23 +661,63 @@ def post_studio_ui() -> None:
 
     car: CarouselSpec = st.session_state["carousel"]
 
-    st.subheader("📸 Slide & Layout Settings")
-    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
+    st.subheader("📸 Carousel Manager")
+    st.caption(f"{len(car.slides)} slide(s) — click a thumbnail to select it, or use the controls below.")
 
-    active_idx = c1.number_input("Active Slide", min_value=1, max_value=len(car.slides), value=car.active_index + 1) - 1
-    car.active_index = active_idx
+    thumb_cols = st.columns(len(car.slides))
+    for i, (col, slide) in enumerate(zip(thumb_cols, car.slides)):
+        with col:
+            thumb = render(slide)
+            thumb.thumbnail((200, 200))
+            st.image(thumb, use_container_width=True)
+            label = slide.name or f"Slide {i + 1}"
+            is_active = (i == car.active_index)
+            if st.button(("▶ " if is_active else "") + label, key=f"sel_slide_{i}",
+                        type="primary" if is_active else "secondary", use_container_width=True):
+                car.active_index = i
+                st.rerun()
+
+    active_idx = car.active_index
     spec = car.slides[active_idx]
 
-    spec.fmt = c2.selectbox("Canvas Format", list(FORMATS.keys()), index=list(FORMATS.keys()).index(spec.fmt))
-
-    if c3.button("➕ Add Slide"):
-        car.slides.append(new_post(f"Slide {len(car.slides)+1} Title", "Add your slide content and customization here."))
+    st.divider()
+    a1, a2, a3, a4, a5, a6 = st.columns([3, 1, 1, 1, 1, 1])
+    spec.name = a1.text_input("Slide name", spec.name, placeholder=f"Slide {active_idx + 1}", key=f"name_{active_idx}")
+    if a2.button("⬅", key="move_left", help="Move this slide earlier", disabled=(active_idx == 0)):
+        car.slides[active_idx - 1], car.slides[active_idx] = car.slides[active_idx], car.slides[active_idx - 1]
+        car.active_index -= 1
         st.rerun()
-
-    if c4.button("🗑 Delete Slide") and len(car.slides) > 1:
+    if a3.button("➡", key="move_right", help="Move this slide later", disabled=(active_idx == len(car.slides) - 1)):
+        car.slides[active_idx + 1], car.slides[active_idx] = car.slides[active_idx], car.slides[active_idx + 1]
+        car.active_index += 1
+        st.rerun()
+    if a4.button("📋", key="dup_slide", help="Duplicate this slide"):
+        new_slide = copy.deepcopy(spec)
+        new_slide.name = (spec.name or f"Slide {active_idx + 1}") + " copy"
+        car.slides.insert(active_idx + 1, new_slide)
+        car.active_index = active_idx + 1
+        st.rerun()
+    if a5.button("➕", key="add_slide", help="Add a new blank slide"):
+        car.slides.append(new_post(f"Slide {len(car.slides) + 1} Title", "Add your slide content and customization here."))
+        car.active_index = len(car.slides) - 1
+        st.rerun()
+    if a6.button("🗑", key="del_slide", help="Delete this slide", disabled=(len(car.slides) <= 1)):
         car.slides.pop(active_idx)
         car.active_index = max(0, active_idx - 1)
         st.rerun()
+
+    spec.fmt = st.selectbox("Canvas Format", list(FORMATS.keys()),
+                            index=list(FORMATS.keys()).index(spec.fmt), key=f"fmt_{active_idx}")
+
+    with st.expander("🔁 Sync branding across the whole carousel"):
+        st.caption("Copies this slide's theme, custom palette and layout onto every other slide — "
+                  "each slide's own text, images and position stay untouched.")
+        if st.button("Apply this slide's branding to all slides"):
+            for s in car.slides:
+                s.theme = spec.theme
+                s.custom_palette = copy.deepcopy(spec.custom_palette) if spec.custom_palette else None
+                s.template = spec.template
+            st.success(f"Applied the '{spec.theme}' theme and '{spec.template}' layout to all {len(car.slides)} slides.")
 
     left, right = st.columns([5, 6], gap="medium")
 
@@ -646,13 +771,52 @@ def post_studio_ui() -> None:
             spec.picture_overlay.box = (x0, y0, x1, y1)
 
         st.subheader("📝 Edit Slide Text Layers")
+        _TEXT_SWATCHES = [
+            ("White", (255, 255, 255)), ("Black", (20, 20, 20)), ("Navy", (20, 40, 72)),
+            ("Gold", (201, 164, 76)), ("Red", (200, 50, 50)), ("Green", (40, 140, 90)),
+            ("Blue", (40, 90, 200)), ("Pink", (230, 90, 150)),
+        ]
         for i, layer in enumerate(spec.text_layers):
             with st.expander(f"Layer: {layer.label}", expanded=(i == 0)):
                 layer.text = st.text_area("Content", layer.text, key=f"t_{active_idx}_{layer.id}")
-                l1, l2, l3 = st.columns(3)
-                layer.style.size = l1.slider("Size", 12, 100, layer.style.size, key=f"s_{active_idx}_{layer.id}")
+
+                f1, f2 = st.columns([2, 1])
+                family_keys = list(FONT_FAMILIES.keys())
+                layer.style.family = f1.selectbox(
+                    "Font", family_keys,
+                    index=family_keys.index(layer.style.family) if layer.style.family in family_keys else 0,
+                    format_func=lambda k: FONT_FAMILIES[k], key=f"fam_{active_idx}_{layer.id}",
+                )
+                layer.style.align = f2.selectbox(
+                    "Align", ["left", "center", "right"],
+                    index=["left", "center", "right"].index(layer.style.align),
+                    key=f"al_{active_idx}_{layer.id}",
+                )
+
+                t1, t2, t3, t4 = st.columns(4)
+                layer.style.bold = t1.checkbox("Bold", layer.style.bold, key=f"b_{active_idx}_{layer.id}")
+                layer.style.italic = t2.checkbox("Italic", layer.style.italic, key=f"i_{active_idx}_{layer.id}")
+                layer.style.underline = t3.checkbox("Underline", layer.style.underline, key=f"u_{active_idx}_{layer.id}")
+                layer.style.highlight = t4.checkbox("Highlight", layer.style.highlight, key=f"h_{active_idx}_{layer.id}")
+
+                st.caption("Text colour")
+                swatch_cols = st.columns(len(_TEXT_SWATCHES) + 1)
+                for sc, (sname, scolor) in zip(swatch_cols, _TEXT_SWATCHES):
+                    if sc.button("⬤", key=f"sw_{active_idx}_{layer.id}_{sname}", help=sname):
+                        layer.style.color = scolor
+                layer.style.color = _from_hex(
+                    swatch_cols[-1].color_picker(
+                        "Custom", _hex(layer.style.color), key=f"tc_{active_idx}_{layer.id}",
+                        label_visibility="collapsed",
+                    ),
+                    fallback=layer.style.color,
+                )
+
+                l1, l2, l3, l4 = st.columns(4)
+                layer.style.size = l1.slider("Size", 12, 140, layer.style.size, key=f"s_{active_idx}_{layer.id}")
                 layer.x = l2.slider("Position X", 0.0, 0.9, layer.x, 0.01, key=f"x_{active_idx}_{layer.id}")
                 layer.y = l3.slider("Position Y", 0.0, 0.9, layer.y, 0.01, key=f"y_{active_idx}_{layer.id}")
+                layer.w = l4.slider("Box width", 0.1, 1.0, layer.w, 0.01, key=f"w_{active_idx}_{layer.id}")
 
     with right:
         st.subheader("🖼️️ Live Canvas Output")
@@ -674,9 +838,27 @@ def post_studio_ui() -> None:
                 zf.writestr(f"slide_{idx+1}.png", s_buf.getvalue())
         d2.download_button("📦 Download Carousel (ZIP)", zip_buf.getvalue(), file_name="carousel.zip", mime="application/zip")
 
-        reel_bytes = export_reel_video(car.slides)
+        st.subheader("🎬 Reel Settings")
+        r1, r2 = st.columns([2, 1])
+        reel_duration = r1.slider("Reel length (seconds)", 15, 20, 18, key="reel_duration")
+        reel_animate = r2.checkbox("Zoom animation", value=True, key="reel_animate",
+                                   help="Subtle Ken Burns zoom per slide, with a crossfade between slides.")
+        if st.button("🎥 Build Reel"):
+            with st.spinner(f"Rendering a {reel_duration}s reel..."):
+                st.session_state["reel_bytes"] = export_reel_video(
+                    car.slides, duration=reel_duration, animate=reel_animate,
+                )
+
+        reel_bytes = st.session_state.get("reel_bytes")
         ext = "mp4" if HAS_IMAGEIO else "gif"
-        d3.download_button(f"🎥 Export Reel ({ext.upper()})", reel_bytes, file_name=f"reel.{ext}", mime=f"video/{ext}")
+        if reel_bytes:
+            d3.download_button(f"⬇️ Download Reel ({ext.upper()})", reel_bytes,
+                               file_name=f"reel.{ext}", mime=f"video/{ext}")
+        else:
+            d3.caption("Click 'Build Reel' to generate one first.")
+        if not HAS_IMAGEIO:
+            st.caption("⚠️ `imageio` isn't installed, so this falls back to an animated GIF instead of MP4. "
+                      "Run `pip install imageio imageio-ffmpeg` for real video export.")
 
 if __name__ == "__main__":
     post_studio_ui()
