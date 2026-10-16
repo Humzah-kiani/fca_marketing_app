@@ -6,6 +6,7 @@ import streamlit as st
 from PIL import Image
 
 from post_studio import build_post_canvas, post_studio_ui
+from direct_social_publisher import render_direct_social_publisher
 
 from config import AI_PROVIDER, GEMINI_MODEL, OLLAMA_MODEL
 from db import init_db, fetch_all, execute
@@ -309,8 +310,8 @@ CATEGORIES = [
     "Lifestyle",
 ]
 
-tab_generate, tab_history, tab_monitor, tab_flagged, tab_design = st.tabs(
-    ["Generate", "History", "Compliance Monitor", "Flagged Posts", "Design Post"]
+tab_generate, tab_history, tab_monitor, tab_flagged, tab_design, tab_publish = st.tabs(
+    ["Generate", "History", "Compliance Monitor", "Flagged Posts", "Design Post", "Publish"]
 )
 
 # ---------------------------------------------------------------- Generate
@@ -404,6 +405,10 @@ with tab_generate:
 # -------------------------------------------------------------- Design Post
 with tab_design:
     post_studio_ui()
+
+# -------------------------------------------------------------- Publish
+with tab_publish:
+    render_direct_social_publisher()
 
 # ----------------------------------------------------------------- History
 with tab_history:

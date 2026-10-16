@@ -1,135 +1,93 @@
-# FCA-Compliant Marketing Text Generator
+# Direct Social Publisher for Streamlit
 
-A Streamlit app that generates UK financial-promotion marketing copy for
-Financial Advisers, grounded in specific FCA Handbook / guidance pages, logs
-every generation, and flags previously generated posts for review when the
-underlying FCA content changes.
+This starter module calls official platform APIs directly. It does not use Buffer, Publer, or Ayrshare.
 
-**This tool assists drafting only. It is not a substitute for your firm's
-compliance sign-off process** — all output should still go through your
-usual financial promotion approval workflow (e.g. sign-off by a CF10/CF30 or
-equivalent) before publication.
+## Included
+- Instagram: single image or 2–10 image carousel
+- Facebook Page: single image or multi-photo Page post
+- LinkedIn: single image or multi-image post
+- Streamlit UI with ordered public image URLs, previews, caption, and explicit publish confirmation
 
-## What it does
+## 1. Install
 
-- **Generate** — pick Post/Carousel, a category (Retirement, Investment,
-  Protection, Mortgage, Employee Benefit, Investment and Estate Planning,
-  Pension, Lifestyle), an optional guideline, and a number of posts. The app
-  calls Google Gemini with a system prompt built from cached FCA reference text
-  and category-specific compliance notes, and returns ready-to-post text.
-- **History** — every input and output is logged: timestamp, adviser,
-  format, category, guideline, number requested, and each generated post's
-  text, keyed to the batch it came from.
-- **Compliance Monitor** — tracks these pages (from your source doc):
-  - COBS 4 — Communicating with clients, including financial promotions
-  - PRIN — Principles for Businesses
-  - COBS 2.1 — Acting honestly, fairly and professionally
-  - FG15/4 — Social Media and Customer Communications (PDF)
-  - FG22/5 — Consumer Duty Guidance (PDF)
-
-  "Run compliance check now" re-fetches each page, hashes its text, and
-  compares to the last-known hash. A change is logged in `fca_change_log`.
-- **Flagged Posts** — whenever a section's content changes, every
-  previously generated post whose generation batch was grounded in the
-  *old* version of that section is automatically marked
-  `flagged_for_review` and listed here with the adviser to notify. You can
-  mark a post "notified" (once you've told the adviser, e.g. by email) and
-  "resolved" once it's been reviewed/regenerated.
-
-## How the "did this change affect my post" logic works
-
-Every `generation_batches` row stores a JSON snapshot of
-`{section_key: content_hash}` for all tracked FCA sections **at the moment
-that batch was generated**. When `check_for_updates()` finds a new hash for
-a section, it searches for batches whose snapshot recorded the *old* hash
-for that section, and flags every post in those batches. This means only
-posts actually generated against the outdated wording are flagged — not
-every post ever generated.
-
-## Setup
-
-1. **PostgreSQL** — create a database:
-   ```bash
-   createdb fca_marketing
-   ```
-2. **Python deps**:
-   ```bash
-   python -m venv venv && source venv/bin/activate
-   pip install -r requirements.txt
-   ```
-3. **Configuration** — copy `.env.example` to `.env` and fill in
-   `DATABASE_URL` and `GEMINI_API_KEY`.
-4. **Run the app** (tables are created automatically on first run):
-   ```bash
-   streamlit run app.py
-   ```
-5. Before your first "Generate", go to the **Compliance Monitor** tab and
-   click **Run compliance check now** at least once, so the app has cached
-   FCA reference text to ground the prompt in.
-
-## Deploying on Streamlit Cloud
-
-1. Push this project to a GitHub repository.
-2. In [Streamlit Community Cloud](https://share.streamlit.io/), create an app
-  from that repository and set the main file to `app.py`.
-3. Add the following values under the app's **Settings > Secrets**. Use a
-  hosted PostgreSQL connection string; a local PostgreSQL or Ollama server
-  is not reachable from Streamlit Cloud.
-
-  ```toml
-  DATABASE_URL = "postgresql://user:password@host:5432/database"
-  AI_PROVIDER = "gemini"
-  GEMINI_API_KEY = "your-gemini-api-key"
-  GEMINI_MODEL = "gemini-2.5-flash"
-  FCA_CHECK_INTERVAL_HOURS = "24"
-  ```
-
-  The app reads these values from Streamlit secrets. Never commit `.env` or
-  `.streamlit/secrets.toml`; both are excluded by `.gitignore`.
-
-## Keeping the FCA monitor current automatically
-
-`monitor_cli.py` runs the same check as the "Run compliance check now"
-button, standalone, so you can schedule it (cron, systemd timer, Task
-Scheduler, a GitHub Action, etc.):
-
-```
-0 6 * * * cd /path/to/fca_marketing_app && /usr/bin/python3 monitor_cli.py >> /var/log/fca_monitor.log 2>&1
+```bash
+pip install streamlit requests
 ```
 
-To wire up actual email/Slack notifications when posts are flagged, extend
-`monitor_cli.py` (or a copy of it) to read the `notified = FALSE` rows in
-`post_flags` after `check_for_updates()` runs and send your notification of
-choice — the schema already tracks adviser name/email against every post via
-`generation_batches.advisor_id`.
+## 2. Add secrets
 
-## Notes / limitations
+Create `.streamlit/secrets.toml` (never commit this file):
 
-- The monitor does simple whole-page text hashing, not clause-level diffing.
-  A change anywhere on a tracked page (including minor site copy) will
-  trigger a flag; review the change log entry and the adviser's flagged
-  posts to judge materiality before asking them to regenerate.
-- PDF text extraction (`FG15/4`, `FG22/5`) is done with `pypdf`, which can
-  occasionally miss text in complex PDF layouts — spot-check
-  `fca_sections.content_text` if a check seems to be missing an update you
-  know happened.
-- The FCA Handbook and guidance library is much larger than the five pages
-  tracked here (which reflect the "financial promotions" scope in your
-  source document). Add more pages by adding entries to `FCA_SECTIONS` in
-  `fca_monitor.py`.
-- Gemini model names change over time — if `GEMINI_MODEL` in `.env`
-  stops working, check the current Gemini model list in Google AI Studio.
+```toml
+# Meta / Facebook / Instagram
+META_GRAPH_VERSION = "v26.0"
+META_ACCESS_TOKEN = "YOUR_META_ACCESS_TOKEN"
+INSTAGRAM_USER_ID = "YOUR_INSTAGRAM_PROFESSIONAL_ACCOUNT_ID"
+FACEBOOK_PAGE_ACCESS_TOKEN = "YOUR_FACEBOOK_PAGE_ACCESS_TOKEN"
+FACEBOOK_PAGE_ID = "YOUR_FACEBOOK_PAGE_ID"
 
-## File layout
-
+# LinkedIn
+LINKEDIN_VERSION = "202608"
+LINKEDIN_ACCESS_TOKEN = "YOUR_LINKEDIN_ACCESS_TOKEN"
+LINKEDIN_AUTHOR_URN = "urn:li:person:YOUR_PERSON_ID"
+# For a company page instead use: urn:li:organization:YOUR_ORGANIZATION_ID
 ```
-app.py            Streamlit UI (Generate / History / Compliance Monitor / Flagged Posts)
-generator.py      Builds the compliance-grounded prompt and calls the Gemini API
-fca_monitor.py    Fetches/hashes tracked FCA pages, detects changes, flags posts
-db.py             Thin PostgreSQL access layer
-schema.sql        Table definitions
-monitor_cli.py    Standalone entrypoint for scheduled compliance checks
-config.py         Environment-variable configuration
-requirements.txt
-.env.example
+
+Versions are configurable. Confirm supported/current versions in the official docs before production use.
+
+## 3. Add to your existing Streamlit app
+
+Copy `direct_social_publisher.py` into the same project directory as your `app.py`, then:
+
+```python
+from direct_social_publisher import render_direct_social_publisher
+
+# Put this in a page, tab, or branch in your existing app:
+render_direct_social_publisher()
 ```
+
+Example sidebar integration:
+
+```python
+page = st.sidebar.radio("Workspace", ["Dashboard", "Direct Social Publisher"])
+if page == "Direct Social Publisher":
+    render_direct_social_publisher()
+```
+
+## 4. Image URL requirements
+
+This UI accepts direct public HTTPS URLs. The URL must resolve to the actual image bytes (not a webpage or a private login page). Instagram and Facebook fetch the media from the URL. LinkedIn's backend downloads it and uploads the bytes to LinkedIn.
+
+If you want users to upload local files from Streamlit, add a storage provider such as Cloudinary or Supabase Storage and pass the resulting public URLs into the publishing functions. This starter does not implement storage.
+
+## 5. Developer setup and permissions
+
+### Meta (Instagram + Facebook Pages)
+- Create a Meta developer app and add the applicable products/use cases.
+- Instagram publishing requires an eligible Instagram professional account and the required permissions/access for the chosen login setup. A personal Instagram account is not sufficient for this publishing flow.
+- Facebook publishing requires a Facebook Page and a Page access token with the necessary publishing permissions.
+- Common permission areas include `instagram_basic`, `instagram_content_publish`, `pages_show_list`, `pages_read_engagement`, and `pages_manage_posts`; exact requirements vary with the selected Meta login product and app mode.
+- App review / business verification may be required before other users or non-role accounts can use the integration.
+- Get the actual Instagram professional account ID and Facebook Page ID from the official account/page discovery flow or Meta tools; do not guess them.
+
+### LinkedIn
+- Create a LinkedIn developer app and request access to the applicable Share on LinkedIn / Community Management products.
+- Use a valid OAuth access token with `w_member_social` for member posting; organization posting requires the appropriate organization permission and the user must have a qualifying Page role.
+- `LINKEDIN_AUTHOR_URN` is the author URN, such as `urn:li:person:123` or `urn:li:organization:123`.
+- LinkedIn Marketing APIs require a versioned `LinkedIn-Version` header. The version in secrets is a configurable example; use a currently supported version for your app.
+
+Official docs:
+- Instagram Platform: https://developers.facebook.com/docs/instagram-platform/
+- Meta Graph API: https://developers.facebook.com/docs/graph-api/
+- Facebook Pages API: https://developers.facebook.com/docs/pages-api/
+- LinkedIn Posts API: https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api
+- LinkedIn Images API: https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/images-api
+
+## 6. Important production notes
+- This is a ready-to-integrate starter, not a complete OAuth product. Tokens are configured in secrets and do not auto-refresh. Implement OAuth, refresh/renewal where available, per-user encrypted token storage, rate-limit handling, audit logs, and duplicate-post protection before opening this to other users.
+- Publishing is immediate. Scheduled publishing needs a durable job queue and a worker (e.g., APScheduler for a small single-instance prototype, or Celery/RQ + Redis for production). Do not rely on Streamlit session state for durable schedules.
+- Platform APIs can change. Carousel support, image count, file requirements, permissions, app review, and account eligibility are controlled by each platform.
+- This module supports image URLs only, not video or mixed-media carousels.
+- Meta's carousel media processing can take time. If it is still processing after the polling window, the module reports that rather than publishing an unready container.
+- Never commit access tokens to Git or expose them to browser-side code.
+- Before using on real accounts, test each platform with a test account/Page and verify the result on the platform itself.
