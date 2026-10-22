@@ -408,6 +408,10 @@ def publish_linkedin(fmt: str, media: list[dict[str, str]], caption: str) -> dic
 
 def publish_now(platform: str, fmt: str, media: list[dict[str, str]], caption: str) -> dict[str, Any]:
     validate_job(platform, fmt, media, caption)
+    zkey = str(_load_secrets().get("ZERNIO_API_KEY", ""))
+    if zkey:
+        from zernio_backend import publish_zernio
+        return publish_zernio(zkey, platform, fmt, media, caption, _load_secrets())
     if platform == "Instagram":
         return publish_instagram(fmt, media, caption)
     if platform == "Facebook Page":
