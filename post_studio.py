@@ -2300,13 +2300,13 @@ def _ui_sidebar(st, car: CarouselSpec) -> None:
     car.swipe = sb.checkbox("Swipe arrow (all but last slide)", value=car.swipe, key=f"swipe_{ss['gen']}")
     sb.divider()
     sb.subheader("Project")
-    if sb.button("💾 Prepare project file", key="prep_proj"):
+    if sb.button("Prepare project file", key="prep_proj"):
         ss["exports"]["project"] = (project_to_bytes(car), "post_studio_project.json", "application/json", _signature(car))
     ex = ss["exports"].get("project")
     if ex:
-        sb.download_button("⬇️ Download project", ex[0], file_name=ex[1], mime=ex[2], key="dl_proj")
+        sb.download_button("Download project", ex[0], file_name=ex[1], mime=ex[2], key="dl_proj")
     up = sb.file_uploader("Open a project (.json)", type=["json"], key=f"open_proj_{ss['gen']}")
-    sb.button("📂 Load project", key="load_proj", on_click=_cb_load_project, args=(st, f"open_proj_{ss['gen']}"), disabled=up is None)
+    sb.button("Load project", key="load_proj", on_click=_cb_load_project, args=(st, f"open_proj_{ss['gen']}"), disabled=up is None)
 
 
 def _ui_strip(st, car: CarouselSpec) -> None:
@@ -2361,7 +2361,7 @@ def _ui_design(st, car, spec, K) -> None:
     st.selectbox("Vector template", tpl_keys, index=tpl_keys.index(spec.template) if spec.template in tpl_keys else 0,
                  format_func=lambda k: TEMPLATE_LABELS[k], key=K("tpl"),
                  on_change=lambda: _cb_template(st, spec, ss[K("tpl")]))
-    if st.checkbox("🖼️ Template gallery", key=K("gal")):
+    if st.checkbox("Template gallery", key=K("gal")):
         per = 4
         for start in range(0, len(tpl_keys), per):
             cols = st.columns(per)
@@ -2382,18 +2382,18 @@ def _ui_design(st, car, spec, K) -> None:
     st.markdown('<div class="pal-strip">' + "".join(f'<div style="background:{_hex(x)}"></div>' for x in
                 (pal.bg, pal.card, pal.peek, pal.cta_bg, pal.ink)) + "</div>", unsafe_allow_html=True)
     g1, g2, g3 = st.columns(3)
-    g1.button("🎲 Random palette", key=K("rand"), on_click=_cb_random_palette, args=(st, spec))
-    g2.button("🖼️ From image", key=K("pimg"), on_click=_cb_palette_from_image, args=(st, spec),
+    g1.button("Random palette", key=K("rand"), on_click=_cb_random_palette, args=(st, spec))
+    g2.button("From image", key=K("pimg"), on_click=_cb_palette_from_image, args=(st, spec),
               help="Uses the background, logo or first picture")
     g3.button("Apply branding to all", key=K("brand_all"), on_click=_cb_branding_all, args=(st, car, spec),
               help="Copies theme, template, gradient, effects, logo and contact bar to every slide")
-    with st.expander("🎨 Colour harmony generator"):
+    with st.expander("Colour harmony generator"):
         h1, h2, h3 = st.columns([1, 2, 1])
         h1.color_picker("Base", "#7a50dc", key=K("hbase"))
         h2.selectbox("Harmony", ["complementary", "analogous", "triadic", "split", "mono"], key=K("hmode"))
         h3.checkbox("Dark", value=True, key=K("hdark"))
         st.button("Generate palette", key=K("hgo"), on_click=_cb_harmony, args=(st, spec, K("hbase"), K("hmode"), K("hdark")))
-    with st.expander("🎛️ Fine-tune colours (turns any preset into a custom palette)"):
+    with st.expander("Fine-tune colours (turns any preset into a custom palette)"):
         tag = "custom" if spec.theme == "custom" else spec.theme
         r1 = st.columns(3)
         r2 = st.columns(3)
@@ -2671,7 +2671,7 @@ def _ui_images(st, car, spec, K) -> None:
         lg.w = _sl(st, "Width", 0.04, 0.6, lg.w, 0.005, K("lg_w"))
         _style_controls(st, lg, lambda n: K(f"lg_{n}"))
 
-    with st.expander("🌄 Background picture"):
+    with st.expander("Background picture"):
         bg = spec.background
         up = st.file_uploader("Upload background", type=["png", "jpg", "jpeg", "webp"], key=K("bg_up"))
         if up is not None and bg.src != _tag(up):
@@ -2687,7 +2687,7 @@ def _ui_images(st, car, spec, K) -> None:
                                         format_func=lambda k: labels[k], key=K("bg_pl"))
             _picture_controls(st, bg, lambda n: K(f"bg_{n}"), with_box=bg.placement == "custom")
 
-    with st.expander("🖼️ Overlay pictures", expanded=True):
+    with st.expander("Overlay pictures", expanded=True):
         counter = f"upn_{spec.id}"
         key = f"addpic_{spec.id}_{ss.get(counter, 0)}"
         st.file_uploader("Add a picture", type=["png", "jpg", "jpeg", "webp"], key=key,
@@ -2703,7 +2703,7 @@ def _ui_images(st, car, spec, K) -> None:
             L = lambda n: K(f"{pic.id}_{n}")
             o = st.columns(3)
             pic.visible = o[0].checkbox("Visible", pic.visible, key=L("vis"))
-            o[1].button("📋 Duplicate", key=L("dup"), on_click=_cb_pic_op, args=(st, spec, pic, "dup"))
+            o[1].button("Duplicate", key=L("dup"), on_click=_cb_pic_op, args=(st, spec, pic, "dup"))
             o[2].button("🗑 Delete", key=L("del"), on_click=_cb_pic_op, args=(st, spec, pic, "del"))
             _picture_controls(st, pic, L)
 
@@ -2755,7 +2755,7 @@ def _ui_preview(st, car, spec, K) -> None:
 def _ui_export(st, car, spec, K) -> None:
     ss = st.session_state
     st.subheader("Export")
-    t_img, t_car, t_reel = st.tabs(["🖼️ This slide", "🎠 Carousel", "🎥 Reel"])
+    t_img, t_car, t_reel = st.tabs(["This slide", "Carousel", "Reel"])
     with t_img:
         c1, c2, c3 = st.columns(3)
         fmt = c1.selectbox("Format", ["PNG", "JPEG", "WEBP"], key="ex_fmt")
@@ -2766,7 +2766,7 @@ def _ui_export(st, car, spec, K) -> None:
                 im = render(spec, scale=sc, page=(car.active_index, len(car.slides)), indicator=car.indicator, swipe=car.swipe)
                 data, mime, ext = export_image(im, fmt, q)
             _store(st, "img", data, f"slide_{car.active_index + 1}.{ext}", mime, car)
-        _offer(st, "img", "⬇️ Download slide", car)
+        _offer(st, "img", "Download slide", car)
     with t_car:
         c1, c2, c3 = st.columns(3)
         cfmt = c1.selectbox("Image format", ["PNG", "JPEG", "WEBP"], key="cx_fmt")
@@ -2779,8 +2779,8 @@ def _ui_export(st, car, spec, K) -> None:
         if b2.button("Build PDF", key="b_pdf"):
             with st.spinner("Rendering slides..."):
                 _store(st, "pdf", export_carousel_pdf(car, csc), "carousel.pdf", "application/pdf", car)
-        _offer(st, "zip", "⬇️ Download carousel (ZIP)", car)
-        _offer(st, "pdf", "⬇️ Download carousel (PDF)", car)
+        _offer(st, "zip", "Download carousel (ZIP)", car)
+        _offer(st, "pdf", "Download carousel (PDF)", car)
     with t_reel:
         r1, r2 = st.columns([2, 1])
         dur = r1.slider("Total length (seconds)", 5, 60, 18, key="rl_dur", help="Slides with their own 'Reel seconds' keep that length.")
@@ -2814,7 +2814,7 @@ def _ui_export(st, car, spec, K) -> None:
                 st.video(ex[0])
             else:
                 st.image(ex[0])
-            _offer(st, "reel", f"⬇️ Download reel ({ex[1].split('.')[-1].upper()})", car)
+            _offer(st, "reel", f"Download reel ({ex[1].split('.')[-1].upper()})", car)
         if not HAS_IMAGEIO:
             st.caption("⚠️ `imageio` isn't installed, so reels save as animated GIF. `pip install imageio imageio-ffmpeg` enables MP4.")
 
@@ -2865,7 +2865,7 @@ def post_studio_ui() -> None:
     _ui_toolbar(st, car, spec, K)
     left, right = st.columns([5, 6], gap="medium")
     with left:
-        tabs = st.tabs(["🎨 Design", "✍️ Text", "🧩 Elements", "🖼️ Images", "✨ Effects"])
+        tabs = st.tabs(["Design", "Text", "Elements", "Images", "Effects"])
         with tabs[0]:
             _ui_design(st, car, spec, K)
         with tabs[1]:
