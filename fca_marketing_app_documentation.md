@@ -97,7 +97,7 @@ The primary workspace for generating compliance-grounded text assets.
 5. **Generation Execution**:
    - Click **Generate**.
    - The app fetches cached FCA Handbook text, constructs the system prompt, calls the AI provider, and sends the raw result to the **Compliance Validator**.
-   - If validation passes, the batch is saved to PostgreSQL alongside an exact cryptographic snapshot of active FCA rules, and output text is presented on screen.
+   - If validation passes, the batch is saved to PostgreSQL alongside an exact cryptographic snapshot of active FCA rules, and output text is presented on screen. The first generated post is also loaded into the active Post Studio design.
 
 ---
 

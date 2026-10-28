@@ -12,7 +12,7 @@ from generator import (
     _generate_with_gemini,
     _is_transient_gemini_error,
 )
-from post_studio import build_post_canvas
+from post_studio import build_post_canvas, new_post
 
 
 def test_generate_posts_requires_live_ai_when_gemini_is_selected(monkeypatch):
@@ -137,3 +137,14 @@ def test_build_post_canvas_generates_square_design():
 
     assert image.size == (1080, 1080)
     assert image.mode == "RGB"
+
+
+def test_generated_copy_replaces_placeholder_text_in_post_design():
+    spec = new_post("Placeholder headline", "Placeholder body")
+    generated_text = "A clear plan can help you consider your options."
+
+    body = post_studio._apply_generated_copy(spec, generated_text)
+
+    assert body.text == generated_text
+    assert body.y == 0.22
+    assert next(layer for layer in spec.text_layers if layer.label == "Headline").text == ""

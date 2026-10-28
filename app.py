@@ -389,7 +389,9 @@ with tab_generate:
                         (batch_id, i + 1, text),
                     )
 
+                st.session_state["generated_post_text"] = posts[0]
                 st.success(f"✅ Generated {len(posts)} post(s) — Batch ID {batch_id}")
+                st.caption("The first generated post has been loaded into the Post Studio design.")
                 for i, text in enumerate(posts):
                     st.markdown(
                         f'<div class="post-label">Post {i + 1}</div>',

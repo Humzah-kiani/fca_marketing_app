@@ -608,6 +608,29 @@ def new_post(headline: str, body: str = "", cta: str = "", category: str = "Prot
                                 style=TextStyle(family="display", size=22, color=pal.cta_bg, bold=True)))
     return PostSpec(category=category, template=template, theme=theme, fmt=fmt, text_layers=layers)
 
+
+def _apply_generated_copy(spec: PostSpec, text: str) -> TextLayer:
+    headline = next((layer for layer in spec.text_layers if layer.label == "Headline"), None)
+    body = next((layer for layer in spec.text_layers if layer.label == "Body Copy"), None)
+    if body is None:
+        palette = spec.get_palette()
+        body = TextLayer(
+            text="",
+            x=0.1,
+            y=0.22,
+            w=0.8,
+            label="Body Copy",
+            style=TextStyle(family="body", size=24, color=palette.ink_muted, bold=False),
+        )
+        spec.text_layers.append(body)
+
+    if headline:
+        headline.text = ""
+    body.text = text
+    body.y = 0.22
+    return body
+
+
 def build_post_canvas(
     headline: str,
     body: str,
@@ -746,6 +769,11 @@ def post_studio_ui() -> None:
         st.session_state["carousel"] = CarouselSpec(slides=[new_post("Customizable Vector Posts", "Design reels, carousels, and square posts with logos, pictures, and full custom color controls.", "Get Started ➔")])
 
     car: CarouselSpec = st.session_state["carousel"]
+    generated_text = st.session_state.pop("generated_post_text", None)
+    if generated_text:
+        active_idx = car.active_index
+        body_layer = _apply_generated_copy(car.slides[active_idx], generated_text)
+        st.session_state[f"t_{active_idx}_{body_layer.id}"] = generated_text
 
     st.subheader("Carousel Manager")
     st.caption(f"{len(car.slides)} slide(s) — click a thumbnail to select it, or use the controls below.")
