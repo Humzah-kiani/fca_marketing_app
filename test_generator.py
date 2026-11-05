@@ -9,8 +9,10 @@ from generator import (
     _build_system_prompt,
     _build_user_prompt,
     _dedupe_posts,
+    _gemini_model_candidates,
     _generate_with_gemini,
     _is_transient_gemini_error,
+    _retry_unique_posts,
 )
 from post_studio import build_post_canvas, new_post
 
@@ -116,6 +118,28 @@ def test_generate_with_gemini_tries_fallback_model_on_internal_error(monkeypatch
 
     assert result == ["Fallback post"]
     assert calls == ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+
+
+def test_gemini_model_candidates_use_configured_models_without_discovery(monkeypatch):
+    monkeypatch.setattr(generator, "GEMINI_MODEL", "primary")
+    monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["fallback", "primary"])
+
+    assert _gemini_model_candidates() == ["primary", "fallback"]
+
+
+def test_generation_retries_only_the_missing_posts():
+    requested_counts = []
+
+    def generate(_format_type, _category, _guideline, count):
+        requested_counts.append(count)
+        if len(requested_counts) == 1:
+            return ["A concise first post."]
+        return [f"A concise replacement post number {index}." for index in range(count)]
+
+    posts = _retry_unique_posts(generate, "Post", "Retirement", "", 3)
+
+    assert requested_counts == [3, 2]
+    assert len(posts) == 3
 
 
 def test_invalid_gemini_api_key_is_not_transient():

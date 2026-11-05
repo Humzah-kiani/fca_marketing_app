@@ -1,4 +1,6 @@
 """Independent post-generation compliance validation."""
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import json
 
 import requests
@@ -213,8 +215,10 @@ def validate_post(post_text: str, format_type: str, category: str) -> dict:
 
 
 def validate_posts(posts: list, format_type: str, category: str) -> list:
-    """Validate every generated post independently."""
-    return [
-        validate_post(post, format_type, category)
-        for post in posts
-    ]
+    """Validate each post independently, concurrently, and in input order."""
+    if not posts:
+        return []
+
+    validate = partial(validate_post, format_type=format_type, category=category)
+    with ThreadPoolExecutor(max_workers=min(4, len(posts))) as executor:
+        return list(executor.map(validate, posts))
