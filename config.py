@@ -47,6 +47,7 @@ def _normalise_gemini_model(model_name: str) -> str:
         "gemini-3.6-flash",
         "gemini-2.5-flash",
         "gemini-2.5-flash-preview-tts",
+        "gemini-2.0-flash",
         "gemini-1.5-flash",
     ):
         return "gemini-3.8-flash"
@@ -55,7 +56,7 @@ def _normalise_gemini_model(model_name: str) -> str:
 
 # Active text generation model.
 GEMINI_MODEL = _normalise_gemini_model(_setting("GEMINI_MODEL", "gemini-3.8-flash"))
-GEMINI_FALLBACK_MODELS = ["gemini-3.8-flash-lite", "gemini-2.0-flash"]
+GEMINI_FALLBACK_MODELS = ["gemini-3.8-flash-lite"]
 
 # --- Local Ollama API ------------------------------------------------------
 # Use a lightweight local LLM for more stable downloads and lower RAM usage.
