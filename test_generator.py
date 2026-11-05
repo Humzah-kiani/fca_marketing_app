@@ -89,6 +89,35 @@ def test_generate_with_gemini_tries_fallback_model_on_404_or_503(monkeypatch):
     assert calls == ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
 
 
+def test_generate_with_gemini_tries_fallback_model_on_internal_error(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+        class models:
+            @staticmethod
+            def generate_content(model, *args, **kwargs):
+                calls.append(model)
+                if model == "gemini-3.8-flash":
+                    raise RuntimeError(
+                        "500 INTERNAL: {'error': {'message': 'Internal error encountered.'}}"
+                    )
+                return type("Response", (), {"text": '["Fallback post"]'})()
+
+    monkeypatch.setattr(generator, "GEMINI_MODEL", "gemini-3.8-flash")
+    monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["gemini-3.8-flash-lite"])
+    monkeypatch.setattr(generator, "genai", type("FakeGenAI", (), {"Client": FakeClient}))
+    monkeypatch.setattr(generator, "types", type("FakeTypes", (), {"GenerateContentConfig": lambda **kwargs: kwargs}))
+    monkeypatch.setattr(generator, "get_sections_reference_text", lambda: "Reference text")
+
+    result = _generate_with_gemini("Post", "Retirement", "Campaign", 1)
+
+    assert result == ["Fallback post"]
+    assert calls == ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+
+
 def test_invalid_gemini_api_key_is_not_transient():
     error = RuntimeError("400 INVALID_ARGUMENT: API_KEY_INVALID: API key not valid")
 

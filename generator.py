@@ -481,6 +481,8 @@ def _is_transient_gemini_error(exc: Exception) -> bool:
         for token in [
             "503",
             "503 unavailable",
+            "500",
+            "internal error",
             "unavailable",
             "rate limit",
             "429",
