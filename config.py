@@ -43,14 +43,19 @@ def _normalise_gemini_model(model_name: str) -> str:
     raw = (model_name or "").strip()
     if raw.startswith("models/"):
         raw = raw.replace("models/", "", 1)
-    if not raw or raw in ("gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.5-flash-preview-tts"):
+    if not raw or raw in (
+        "gemini-3.6-flash",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-preview-tts",
+        "gemini-1.5-flash",
+    ):
         return "gemini-3.8-flash"
     return raw
 
 
 # Active text generation model.
 GEMINI_MODEL = _normalise_gemini_model(_setting("GEMINI_MODEL", "gemini-3.8-flash"))
-GEMINI_FALLBACK_MODELS = ["gemini-3.8-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"]
+GEMINI_FALLBACK_MODELS = ["gemini-3.8-flash-lite", "gemini-2.0-flash"]
 
 # --- Local Ollama API ------------------------------------------------------
 # Use a lightweight local LLM for more stable downloads and lower RAM usage.
