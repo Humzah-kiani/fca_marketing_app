@@ -738,7 +738,7 @@ def _edit_text(st, spec, layer):
     k = lambda n: f"aiT_{layer.id}_{n}_{ss['gen']}"
     s = layer.style
     layer.text = st.text_area("Text", layer.text, key=k("t"), height=100)
-    c1, = st.columns(1)
+    c1, c2 = st.columns(2)
     s.size = ps._sl(c1, "Size", 10, 300, int(s.size), 1, k("sz"))
     fams = list(ps.FONT_FAMILIES)
     s.family = c2.selectbox("Font", fams, index=fams.index(s.family) if s.family in fams else 0,

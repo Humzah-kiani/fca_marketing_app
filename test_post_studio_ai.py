@@ -1,10 +1,22 @@
 import post_studio as ps
+from streamlit.testing.v1 import AppTest
 from post_studio_ai import (
     Guidelines,
     _app_copy_payload,
     _sync_fca_generated_content,
     slide_copy,
 )
+
+
+def test_studio_ui_renders_generated_copy_without_errors():
+    app = AppTest.from_file("post_studio_ai.py", default_timeout=30)
+    app.session_state["generated_post_text"] = "Plan ahead\n\nReview your options."
+    app.session_state["generated_post_format"] = "Post"
+    app.session_state["generated_post_category"] = "Retirement"
+
+    app.run()
+
+    assert not app.exception, [str(error.value) for error in app.exception]
 
 
 def test_app_post_copy_is_preserved_in_design_payload():
