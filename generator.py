@@ -1,8 +1,14 @@
 """
-Generates FCA-aware marketing copy using the Google Gemini API, grounded in the
-currently cached FCA Handbook/guidance text (see fca_monitor.py).
+Generates SHORT, punchy, FCA-aware marketing copy using the Google Gemini API
+(or Ollama), grounded in the currently cached FCA Handbook/guidance text
+(see fca_monitor.py).
+
+Output style:
+  * Post     -> hook headline + 2-3 punchy lines + one-line risk note + one-line CTA
+  * Carousel -> 5 slides, one short idea per slide (hook -> value -> value -> risk -> CTA)
 """
 import json
+import re
 import uuid
 
 import requests
@@ -24,6 +30,15 @@ from config import (
 )
 from fca_monitor import get_sections_reference_text
 
+# --------------------------------------------------------------------------- #
+# Length limits (tweak these to make copy shorter / longer)
+# --------------------------------------------------------------------------- #
+POST_MAX_WORDS = 65             # whole post, including risk line + CTA
+POST_HEADLINE_MAX_WORDS = 10
+CAROUSEL_SLIDES = 5
+CAROUSEL_SLIDE_MAX_WORDS = 18   # per slide (after the "Slide N:" label)
+CAROUSEL_MAX_WORDS = 90         # whole carousel
+
 CATEGORY_NOTES = {
     "Retirement": "Do not imply guaranteed retirement income; note that pension/investment value can go down as well as up.",
     "Investment": "Must convey capital-at-risk; never promise or imply guaranteed returns; balance any benefit with a risk statement.",
@@ -35,53 +50,78 @@ CATEGORY_NOTES = {
     "Lifestyle": "Keep aspirational language honest — do not tie specific lifestyle outcomes to a financial product's performance.",
 }
 
-SYSTEM_PROMPT_TEMPLATE = """You are a UK financial promotions copywriter creating premium social media content for a regulated financial adviser brand.
+SYSTEM_PROMPT_TEMPLATE = """You are a UK financial promotions copywriter creating SHORT, scroll-stopping social media content for a regulated financial adviser brand.
 
-Write highly polished, client-facing {format_type} content for the "{category}" category. The content should feel premium, confident, clear and useful, like a modern adviser social post rather than a generic template or legal disclaimer.
+Write {format_type} content for the "{category}" category. Think punchy, modern and premium — like a modern financial adviser social brand on Instagram/LinkedIn, NOT a paragraph, essay or legal notice.
 
-Core rules:
-- The target category is exactly: {category}.
-- Make each post unmistakably tailored to {category} with category-specific examples, needs, decisions and language.
-- Use a premium, professional tone: clean, confident, helpful, and easy to read.
-- Open with a strong hook or smart question, then explain the value, decision or risk clearly.
-- Keep language natural and human. Avoid dry legal phrasing, overused slogans, repeated hooks, and generic filler.
-- Do not repeat the same hook, wording, structure, or examples across the final set.
-- Each item in the final JSON array must be substantially different from the others in angle, emphasis and wording.
-- Do not produce repetitive content across attempts or across items in the same batch.
-- Never promise or imply guaranteed returns, outcomes, or benefits.
-- Always balance any benefit with a relevant risk or suitability statement.
-- No urgency pressure, no fake scarcity, no hard-selling tactics.
-- Do not give personal advice; invite the reader to speak with a regulated adviser if appropriate.
-- Category-specific note: {category_note}
-- Style requirement: write like a premium financial advice brand, with polished headlines, short readable sentences, a clear takeaway, and a professional CTA.
-- For each asset, include a clear practical takeaway or action for the reader.
+BREVITY IS THE #1 RULE:
+{format_rules}
 
-Format-specific output expectations:
-- For Post: write a complete, stand-alone social post with a headline-like opening and concise but informative body copy.
-- For Carousel: write a slide-ready sequence with distinct slide ideas, each with a clear message and practical takeaway.
+Style rules:
+- Open with a strong hook: a bold question, a surprising truth, or a relatable moment.
+- Short sentences. Plain words. One idea per line. No jargon, no filler, no waffle.
+- Make it category-specific to {category} (real decisions, needs and moments), not generic finance talk.
+- Emojis: none, or one at most per asset, and only if it adds meaning.
+- No hashtags unless the adviser guideline asks for them.
+- Every asset must end with a soft, professional CTA (e.g. "Talk to a regulated adviser.").
 
-Reference material (use only the most relevant extracts):
+Compliance rules (keep them, but say them briefly):
+- Never promise or imply guaranteed returns, outcomes or benefits.
+- Balance any benefit with ONE short risk/suitability line (max 15 words).
+- No urgency pressure, fake scarcity or hard-selling.
+- No personal advice; invite the reader to speak with a regulated adviser.
+- Category note: {category_note}
+
+Variety rules:
+- Every item in the array must be distinct and use a different hook, angle and structure.
+- Never reuse the same hook or opening words across items.
+
+Reference material (background only — never quote it or copy its wording):
 {reference_text}
 
 Additional adviser guideline: {guideline}
 
 Output format:
-- Return only a JSON array of exactly {num_posts} strings.
-- No markdown, no headings, no commentary outside the JSON array.
-- Each string must be a complete final {format_type} asset for the "{category}" category.
-- Make each asset different in wording, angle and structure, not copy-pasted variations of the same text.
-- Keep the writing polished, credible and suitable for a modern financial adviser social brand.
+- Return ONLY a JSON array of exactly {num_posts} strings.
+- No markdown, no code fences, no commentary outside the array.
+- Use "\\n" for line breaks inside each string.
+- Each string is one complete {format_type} for the "{category}" category.
 """
 
+POST_RULES = f"""- Each post is MAX {POST_MAX_WORDS} words in total.
+- Structure (each part on its own line, separated by a blank line):
+  1) Headline hook (max {POST_HEADLINE_MAX_WORDS} words)
+  2) 2-3 punchy lines of value (max 15 words per line)
+  3) One short risk line (max 15 words)
+  4) One short CTA line (max 12 words)
+- No paragraphs. No block of text longer than one sentence.
+- Style example (do NOT copy it):
+  "Retiring soon? Your pension has a plan too.\\n\\nKnow your options.\\nCompare your income choices.\\nPlan around your life, not a number.\\n\\nPension values can fall as well as rise.\\n\\nSpeak to a regulated adviser." """
 
+CAROUSEL_RULES = f"""- Each carousel has EXACTLY {CAROUSEL_SLIDES} slides, MAX {CAROUSEL_SLIDE_MAX_WORDS} words per slide, {CAROUSEL_MAX_WORDS} words in total.
+- Format each slide on its own line as "Slide N: <text>".
+- Slide 1 = bold hook (a question or striking statement).
+- Slides 2-3 = one clear, practical idea each (a tip, a question to ask, a common mistake).
+- Slide 4 = short risk/suitability reminder.
+- Slide 5 = soft CTA to speak with a regulated adviser.
+- One idea per slide. No paragraphs.
+- Style example (do NOT copy it):
+  "Slide 1: Thinking about your pension?\\nSlide 2: Know what you want your money to do.\\nSlide 3: Compare options before you commit.\\nSlide 4: Values can fall as well as rise.\\nSlide 5: Speak to a regulated adviser." """
+
+
+# --------------------------------------------------------------------------- #
+# Prompt builders
+# --------------------------------------------------------------------------- #
 def _build_system_prompt(format_type: str, category: str, category_note: str, reference_text: str, guideline: str, num_posts: int) -> str:
-    """Build a shorter prompt that is still category-specific but avoids slow, bloated inputs."""
+    """Build a compact, category-specific prompt that enforces short-form output."""
+    format_rules = CAROUSEL_RULES if format_type == "Carousel" else POST_RULES
     return SYSTEM_PROMPT_TEMPLATE.format(
         format_type=format_type,
         category=category,
-        category_note=category_note,
-        reference_text=(reference_text or "(No additional FCA text available)")[:2000],
-        guideline=(guideline or "(none provided)")[:500],
+        category_note=category_note or "(none)",
+        format_rules=format_rules,
+        reference_text=(reference_text or "(No additional FCA text available)")[:1500],
+        guideline=(guideline or "(none provided)")[:300],
         num_posts=num_posts,
     )
 
@@ -93,30 +133,112 @@ def _build_user_prompt(
     variation_token: str | None = None,
     angle_seed: int | None = None,
 ) -> str:
-    """Add a generation-specific seed so every retry uses a fresh angle instead of the same content."""
+    """Add a generation-specific seed so every retry uses a fresh angle."""
     variation_token = variation_token or uuid.uuid4().hex[:8]
     angle_seed = angle_seed if angle_seed is not None else int(variation_token[:2], 16)
     angle_options = [
-        "practical decision-making",
-        "risk-aware education",
-        "common misconceptions",
-        "personal circumstances and suitability",
-        "benefits balanced with realistic risk",
+        "a smart question that challenges an assumption",
+        "a common mistake and how to avoid it",
+        "a quick checklist of things to consider",
+        "a relatable life moment that triggers this decision",
+        "a myth vs reality",
+        "benefit balanced with realistic risk",
     ]
     angles = [
         angle_options[(angle_seed + offset) % len(angle_options)]
-        for offset in range(min(num_posts, 5))
+        for offset in range(min(num_posts, len(angle_options)))
     ]
     serialised_angles = "; ".join(f"{i + 1}) {angle}" for i, angle in enumerate(angles))
+
+    if format_type == "Carousel":
+        limit = f"exactly {CAROUSEL_SLIDES} slides, max {CAROUSEL_SLIDE_MAX_WORDS} words each"
+    else:
+        limit = f"max {POST_MAX_WORDS} words each"
+
     return (
-        f"Create {num_posts} distinct {format_type.lower()} assets for the '{category}' category. "
-        f"This is generation attempt {variation_token}. Use these different angles: {serialised_angles}. "
-        f"Each output must be clearly tailored to {category}, not a generic template, and must not repeat the same hook, wording, structure, or examples as earlier attempts."
+        f"Create {num_posts} distinct, SHORT {format_type.lower()} assets for the '{category}' category ({limit}). "
+        f"Generation attempt {variation_token}. Use these angles in order: {serialised_angles}. "
+        f"Keep it punchy and scannable — no paragraphs. Each must be tailored to {category} "
+        f"and must not reuse the same hook, wording or structure as another."
     )
 
 
+# --------------------------------------------------------------------------- #
+# Parsing / cleaning / validation
+# --------------------------------------------------------------------------- #
+def _normalise_item(item) -> str:
+    """Turn whatever the model returned for one asset into a clean string."""
+    if isinstance(item, str):
+        text = item
+    elif isinstance(item, list):
+        text = "\n".join(str(part) for part in item)
+    elif isinstance(item, dict):
+        text = "\n".join(str(value) for value in item.values())
+    else:
+        return ""
+    text = text.replace("\\n", "\n")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _parse_posts(raw: str) -> list[str]:
+    """Extract a JSON array of assets from raw model output (tolerates fences / chatter)."""
+    raw = (raw or "").strip()
+    cleaned = raw
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`").strip()
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+
+    candidates = [cleaned]
+    match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+    if match:
+        candidates.append(match.group(0))
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(data, list) and data:
+            items = [_normalise_item(item) for item in data]
+            return [item for item in items if item]
+
+    single = _normalise_item(raw)
+    return [single] if single else []
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\b[\w'’%£$-]+\b", text))
+
+
+def _is_concise(post: str, format_type: str) -> bool:
+    """True when the asset respects the short-form limits."""
+    if not isinstance(post, str) or not post.strip():
+        return False
+
+    if format_type == "Carousel":
+        slides = [line.strip() for line in post.splitlines() if line.strip()]
+        if not 3 <= len(slides) <= CAROUSEL_SLIDES + 1:
+            return False
+        total = 0
+        for slide in slides:
+            body = re.sub(r"^\s*slide\s*\d+\s*[:.\-]\s*", "", slide, flags=re.IGNORECASE)
+            words = _word_count(body)
+            if words > CAROUSEL_SLIDE_MAX_WORDS + 4:  # small tolerance
+                return False
+            total += words
+        return total <= CAROUSEL_MAX_WORDS + 15
+
+    first_line = next((line for line in post.splitlines() if line.strip()), "")
+    if _word_count(first_line) > POST_HEADLINE_MAX_WORDS + 4:
+        return False
+    return _word_count(post) <= POST_MAX_WORDS + 10
+
+
 def _dedupe_posts(posts: list[str]) -> list[str]:
-    """Remove repeated text while preserving the first unique instance for each item."""
+    """Remove repeated text while preserving the first unique instance."""
     unique_posts: list[str] = []
     seen: set[str] = set()
     for post in posts:
@@ -130,60 +252,82 @@ def _dedupe_posts(posts: list[str]) -> list[str]:
     return unique_posts
 
 
+def _max_tokens_for(format_type: str, num_posts: int) -> int:
+    """Short copy needs few tokens; leave headroom for model 'thinking' overhead."""
+    per_item = 160 if format_type == "Carousel" else 130
+    return max(1024, num_posts * per_item + 700)
+
+
+# --------------------------------------------------------------------------- #
+# Fallback copy (short, compliant, used only if the AI can't produce enough)
+# --------------------------------------------------------------------------- #
+def _cta_line(guideline: str) -> str:
+    g = (guideline or "").strip()
+    if g and _word_count(g) <= 14:
+        return g
+    return "Speak to a regulated adviser."
+
+
 def _format_fallback_post(category: str, guideline: str, index: int) -> str:
-    """Return a polished, compliant social-post template."""
-    headline = [
-        f"{category}: a decision worth thinking through carefully",
-        f"Understanding the options before making a {category.lower()} decision",
-        f"What to consider before choosing a {category.lower()} approach",
+    cat = category.lower()
+    hooks = [
+        f"Thinking about {cat}? Start with the right questions.",
+        f"{category} choices are personal. Your plan should be too.",
+        f"Before your next {cat} decision, pause.",
+        f"Not sure where to begin with {cat}?",
+        f"{category}: clarity first, decisions second.",
     ]
-    body = [
-        "Making a financial decision can feel overwhelming, especially when there are several options to weigh up. The most important step is to understand the benefits, the risks and how the decision fits with your broader goals.",
-        "For many people, a good starting point is clarity. Knowing what a product or approach does, how it works, and what could affect outcomes helps you make a more informed decision.",
-        "Financial decisions are personal and can depend on your goals, timescale, attitude to risk and tax position. Getting the right information first can help you think through what may be suitable for you.",
+    bodies = [
+        "Know your goals.\nUnderstand the trade-offs.\nPlan with your timeline in mind.",
+        "Compare your options.\nCheck the risks as well as the benefits.\nChoose what fits your life.",
+        "Ask what it does.\nAsk what it costs.\nAsk what could go wrong.",
+        "Your goals matter.\nYour timescale matters.\nSo does your comfort with risk.",
+        "Look at the bigger picture.\nTake time to weigh it up.\nGet the facts before you act.",
     ]
-    risk = (
-        "Financial products can go down as well as up, and tax treatment depends on individual circumstances. "
-        "Any decision should be based on your own objectives and risk profile."
-    )
-    cta = guideline.strip() if guideline.strip() else "If you'd like to discuss your circumstances, we can talk through the options and help you think about what may be suitable."
+    risks = [
+        "Values can go down as well as up.",
+        "Outcomes aren't guaranteed and depend on your circumstances.",
+        "Tax treatment depends on individual circumstances.",
+    ]
     return (
-        f"{headline[index % len(headline)]}\n\n"
-        f"{body[index % len(body)]}\n\n"
-        f"{risk}\n\n"
-        f"{cta}"
+        f"{hooks[index % len(hooks)]}\n\n"
+        f"{bodies[index % len(bodies)]}\n\n"
+        f"{risks[index % len(risks)]}\n\n"
+        f"{_cta_line(guideline)}"
     )
 
 
 def _format_fallback_carousel(category: str, guideline: str, index: int) -> str:
-    """Return a compliant carousel deck in slide-ready format."""
-    guidance = guideline.strip() or "If you'd like to understand how this may fit with your circumstances, we can discuss the options with you."
-    heading = [
-        f"{category}: what to think about",
-        f"The key question is fit",
-        f"Benefits and trade-offs",
-        f"Risk matters",
-        f"Next steps",
+    cat = category.lower()
+    hooks = [
+        f"Thinking about {cat}?",
+        f"{category}: are you asking the right questions?",
+        f"3 things to check before your {cat} decision",
+        f"Common {cat} mistakes to avoid",
+        f"{category} made simpler",
     ]
-    slide_1 = f"Slide 1: {heading[index % len(heading)]}"
-    slide_2 = (
-        "Slide 2: Before making a financial decision, it helps to understand what the option is designed to do, "
-        "who it may be suitable for, and what it does not do."
-    )
-    slide_3 = (
-        "Slide 3: A clear view of the benefits matters, but so does understanding the risks, time horizon and any tax or legal considerations."
-    )
-    slide_4 = (
-        "Slide 4: Financial products can go down as well as up, and outcomes can depend on your personal circumstances, market conditions and timing."
-    )
-    slide_5 = f"Slide 5: {guidance}"
-    return "\n".join([slide_1, slide_2, slide_3, slide_4, slide_5])
+    mids = [
+        ("Know what you want your money to do.", "Compare options before you commit."),
+        ("Look at your timescale, not just today.", "Weigh benefits against the risks."),
+        ("Ask what it costs and how it works.", "Ask what could go wrong."),
+        ("Rushing a decision can limit your choices.", "Take time to understand the trade-offs."),
+        ("Start with your goals.", "Build the plan around your life."),
+    ]
+    risk = "Values can go down as well as up. Nothing is guaranteed."
+    slide_2, slide_3 = mids[index % len(mids)]
+    return "\n".join([
+        f"Slide 1: {hooks[index % len(hooks)]}",
+        f"Slide 2: {slide_2}",
+        f"Slide 3: {slide_3}",
+        f"Slide 4: {risk}",
+        f"Slide 5: {_cta_line(guideline)}",
+    ])
 
 
-def _fallback_posts(format_type: str, category: str, guideline: str, num_posts: int) -> list:
-    """Return compliant, safe default copy when no AI provider is available."""
+def _fallback_posts(format_type: str, category: str, guideline: str, num_posts: int, start_index: int = 0) -> list:
+    """Return compliant, short default copy."""
     posts = []
-    for index in range(max(num_posts, 1)):
+    for index in range(start_index, start_index + max(num_posts, 1)):
         if format_type == "Carousel":
             posts.append(_format_fallback_carousel(category, guideline, index))
         else:
@@ -191,6 +335,9 @@ def _fallback_posts(format_type: str, category: str, guideline: str, num_posts: 
     return posts
 
 
+# --------------------------------------------------------------------------- #
+# Ollama
+# --------------------------------------------------------------------------- #
 def _resolve_ollama_model() -> str:
     """Return the installed Ollama model or raise a clear, actionable error."""
     try:
@@ -228,7 +375,7 @@ def _resolve_ollama_model() -> str:
     )
 
 
-def _call_ollama(prompt: str) -> str:
+def _call_ollama(prompt: str, max_tokens: int) -> str:
     model_name = _resolve_ollama_model()
     response = requests.post(
         f"{OLLAMA_BASE_URL}/api/generate",
@@ -236,7 +383,7 @@ def _call_ollama(prompt: str) -> str:
             "model": model_name,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 1.1, "top_p": 0.95},
+            "options": {"temperature": 0.95, "top_p": 0.95, "num_predict": max_tokens},
         },
         timeout=180,
     )
@@ -270,26 +417,18 @@ def _generate_with_ollama(format_type: str, category: str, guideline: str, num_p
             num_posts,
             variation_token=variation_token,
             angle_seed=int(variation_token[:2], 16),
-        )
+        ),
+        max_tokens=_max_tokens_for(format_type, num_posts),
     )
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-    try:
-        posts = json.loads(cleaned)
-        if not isinstance(posts, list) or not posts:
-            raise ValueError("Response was not a non-empty JSON array")
-    except Exception:
-        posts = [cleaned or raw]
-    posts = _dedupe_posts(posts)
+    posts = _dedupe_posts(_parse_posts(raw))
     return posts[: max(num_posts, 1)]
 
 
+# --------------------------------------------------------------------------- #
+# Gemini
+# --------------------------------------------------------------------------- #
 def _list_available_gemini_models(client) -> list[str]:
-    """Return model names that support generateContent when the API exposes them."""
+    """Return model names exposed by the API (best effort)."""
     try:
         response = client.models.list()
     except Exception:
@@ -395,7 +534,7 @@ def _generate_with_gemini(format_type: str, category: str, guideline: str, num_p
                 ),
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
-                    max_output_tokens=1400,
+                    max_output_tokens=_max_tokens_for(format_type, num_posts),
                     temperature=0.9,
                     top_p=0.9,
                 ),
@@ -404,7 +543,7 @@ def _generate_with_gemini(format_type: str, category: str, guideline: str, num_p
             raw = getattr(response, "text", "")
             if not raw and hasattr(response, "candidates"):
                 parts = []
-                for candidate in response.candidates:
+                for candidate in response.candidates or []:
                     content = getattr(candidate, "content", None)
                     for part in getattr(content, "parts", []) or []:
                         text = getattr(part, "text", "")
@@ -412,22 +551,7 @@ def _generate_with_gemini(format_type: str, category: str, guideline: str, num_p
                             parts.append(text)
                 raw = "".join(parts)
 
-            raw = raw.strip()
-            cleaned = raw
-            if cleaned.startswith("```"):
-                cleaned = cleaned.strip("`")
-                if cleaned.startswith("json"):
-                    cleaned = cleaned[4:]
-                cleaned = cleaned.strip()
-
-            try:
-                posts = json.loads(cleaned)
-                if not isinstance(posts, list) or not posts:
-                    raise ValueError("Response was not a non-empty JSON array")
-            except Exception:
-                posts = [raw]
-
-            posts = _dedupe_posts(posts)
+            posts = _dedupe_posts(_parse_posts(raw or ""))
             return posts[: max(num_posts, 1)]
         except Exception as exc:  # pragma: no cover - exercised by fallback tests
             last_error = exc
@@ -440,23 +564,46 @@ def _generate_with_gemini(format_type: str, category: str, guideline: str, num_p
     raise RuntimeError("Gemini generation failed with no usable model candidates.")
 
 
-def _retry_unique_posts(generator_func, format_type: str, category: str, guideline: str, num_posts: int, max_attempts: int = 2):
-    """Keep retrying only briefly with fresh angles, to reduce latency while still enforcing uniqueness."""
+# --------------------------------------------------------------------------- #
+# Retry + enforcement
+# --------------------------------------------------------------------------- #
+def _retry_unique_posts(generator_func, format_type: str, category: str, guideline: str, num_posts: int, max_attempts: int = 3):
+    """
+    Retry with fresh angles until we have enough UNIQUE and CONCISE assets.
+    Over-long output is discarded (it's what made posts read like paragraphs);
+    any remaining gap is topped up with short, compliant fallback copy.
+    """
+    target = max(num_posts, 1)
     collected: list[str] = []
     seen: set[str] = set()
-    for attempt in range(max_attempts):
-        candidate_posts = generator_func(format_type, category, guideline, num_posts)
+
+    for _ in range(max_attempts):
+        candidate_posts = generator_func(format_type, category, guideline, target)
         for post in candidate_posts:
             if not isinstance(post, str):
                 continue
             key = " ".join(post.lower().split())
             if key in seen:
                 continue
+            if not _is_concise(post, format_type):
+                continue
             seen.add(key)
             collected.append(post)
-        if len(collected) >= max(num_posts, 1):
-            return collected[: max(num_posts, 1)]
-    return collected[: max(num_posts, 1)]
+        if len(collected) >= target:
+            return collected[:target]
+
+    if len(collected) < target:
+        needed = target - len(collected)
+        for filler in _fallback_posts(format_type, category, guideline, needed + 5, start_index=uuid.uuid4().int % 5):
+            key = " ".join(filler.lower().split())
+            if key in seen:
+                continue
+            seen.add(key)
+            collected.append(filler)
+            if len(collected) >= target:
+                break
+
+    return collected[:target]
 
 
 def generate_posts(format_type: str, category: str, guideline: str, num_posts: int) -> list:
