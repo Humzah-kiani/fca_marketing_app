@@ -127,19 +127,19 @@ def test_gemini_model_candidates_use_configured_models_without_discovery(monkeyp
     assert _gemini_model_candidates() == ["primary", "fallback"]
 
 
-def test_generation_retries_only_the_missing_posts():
+def test_generation_uses_one_request_and_fills_missing_posts_locally():
     requested_counts = []
 
     def generate(_format_type, _category, _guideline, count):
         requested_counts.append(count)
-        if len(requested_counts) == 1:
-            return ["A concise first post."]
-        return [f"A concise replacement post number {index}." for index in range(count)]
+        return ["A concise first post."]
 
     posts = _retry_unique_posts(generate, "Post", "Retirement", "", 3)
 
-    assert requested_counts == [3, 2]
+    assert requested_counts == [3]
     assert len(posts) == 3
+    assert posts[0] == "A concise first post."
+    assert len(set(posts)) == 3
 
 
 def test_invalid_gemini_api_key_is_not_transient():

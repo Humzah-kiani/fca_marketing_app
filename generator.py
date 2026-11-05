@@ -10,6 +10,7 @@ Output style:
 import json
 import re
 import uuid
+from functools import lru_cache
 
 import requests
 
@@ -253,9 +254,9 @@ def _dedupe_posts(posts: list[str]) -> list[str]:
 
 
 def _max_tokens_for(format_type: str, num_posts: int) -> int:
-    """Short copy needs few tokens; leave headroom for model 'thinking' overhead."""
-    per_item = 160 if format_type == "Carousel" else 130
-    return max(1024, num_posts * per_item + 700)
+    """Keep the output budget close to the amount of copy actually required."""
+    per_item = 115 if format_type == "Carousel" else 75
+    return min(1200, max(256, num_posts * per_item + 100))
 
 
 # --------------------------------------------------------------------------- #
@@ -338,6 +339,7 @@ def _fallback_posts(format_type: str, category: str, guideline: str, num_posts: 
 # --------------------------------------------------------------------------- #
 # Ollama
 # --------------------------------------------------------------------------- #
+@lru_cache(maxsize=1)
 def _resolve_ollama_model() -> str:
     """Return the installed Ollama model or raise a clear, actionable error."""
     try:
@@ -383,9 +385,9 @@ def _call_ollama(prompt: str, max_tokens: int) -> str:
             "model": model_name,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 0.95, "top_p": 0.95, "num_predict": max_tokens},
+            "options": {"temperature": 0.75, "top_p": 0.9, "num_predict": max_tokens},
         },
-        timeout=180,
+        timeout=90,
     )
     response.raise_for_status()
     payload = response.json()
@@ -509,6 +511,7 @@ def _generate_with_gemini(format_type: str, category: str, guideline: str, num_p
                     max_output_tokens=_max_tokens_for(format_type, num_posts),
                     temperature=0.9,
                     top_p=0.9,
+                    response_mime_type="application/json",
                 ),
             )
 
@@ -539,11 +542,10 @@ def _generate_with_gemini(format_type: str, category: str, guideline: str, num_p
 # --------------------------------------------------------------------------- #
 # Retry + enforcement
 # --------------------------------------------------------------------------- #
-def _retry_unique_posts(generator_func, format_type: str, category: str, guideline: str, num_posts: int, max_attempts: int = 3):
+def _retry_unique_posts(generator_func, format_type: str, category: str, guideline: str, num_posts: int, max_attempts: int = 1):
     """
-    Retry with fresh angles until we have enough UNIQUE and CONCISE assets.
-    Over-long output is discarded (it's what made posts read like paragraphs);
-    any remaining gap is topped up with short, compliant fallback copy.
+    Make one AI request, keep valid unique assets, and fill any gaps locally.
+    This avoids multiple slow model round-trips for a single user action.
     """
     target = max(num_posts, 1)
     collected: list[str] = []
