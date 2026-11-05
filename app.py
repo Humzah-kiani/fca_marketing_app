@@ -5,7 +5,7 @@ from io import BytesIO
 import streamlit as st
 from PIL import Image
 
-from post_studio import build_post_canvas, post_studio_ui
+from post_studio_ai import post_studio_ai_ui
 from direct_social_publisher import render_direct_social_publisher
 
 from config import AI_PROVIDER, GEMINI_MODEL, OLLAMA_MODEL
@@ -390,6 +390,8 @@ with tab_generate:
                     )
 
                 st.session_state["generated_post_text"] = posts[0]
+                st.session_state["generated_post_format"] = format_type
+                st.session_state["generated_post_category"] = category
                 st.success(f"✅ Generated {len(posts)} post(s) — Batch ID {batch_id}")
                 st.caption("The first generated post has been loaded into the Post Studio design.")
                 for i, text in enumerate(posts):
@@ -406,7 +408,7 @@ with tab_generate:
 
 # -------------------------------------------------------------- Design Post
 with tab_design:
-    post_studio_ui()
+    post_studio_ai_ui()
 
 # -------------------------------------------------------------- Publish
 with tab_publish:

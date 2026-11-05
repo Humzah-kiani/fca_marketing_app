@@ -29,7 +29,7 @@ flowchart TD
         GEN["generator.py (AI Copy Generation)"]
         VAL["compliance_validator.py (Independent Validator)"]
         MON["fca_monitor.py (Regulatory Web Scraper & Hasher)"]
-        PS["post_studio.py (Pillow Image Canvas Engine)"]
+        PS["post_studio.py + post_studio_ai.py (Pillow Canvas & Design Studio)"]
         DB["db.py (PostgreSQL Access Layer)"]
         CFG["config.py (Settings & Environment)"]
     end
@@ -97,13 +97,13 @@ The primary workspace for generating compliance-grounded text assets.
 5. **Generation Execution**:
    - Click **Generate**.
    - The app fetches cached FCA Handbook text, constructs the system prompt, calls the AI provider, and sends the raw result to the **Compliance Validator**.
-   - If validation passes, the batch is saved to PostgreSQL alongside an exact cryptographic snapshot of active FCA rules, and output text is presented on screen. The first generated post is also loaded into the active Post Studio design.
+   - If validation passes, the batch is saved to PostgreSQL alongside an exact cryptographic snapshot of active FCA rules, and output text is presented on screen. The first generated post, format, and category are loaded into the Design Post studio.
 
 ---
 
 ### Tab 2: Design Post (Post Studio Graphic Editor)
 
-Built in [post_studio.py](file:///c:/Users/user/OneDrive%20-%20Higher%20Education%20Commission/Desktop/fca_marketing_app/post_studio.py), **Post Studio** is an in-app visual graphics editor powered entirely by Python Pillow and Streamlit controls.
+Built on the Pillow rendering engine in [post_studio.py](file:///c:/Users/user/OneDrive%20-%20Higher%20Education%20Commission/Desktop/fca_marketing_app/post_studio.py) and the integrated design UI in `post_studio_ai.py`, **Post Studio** is an in-app visual graphics editor powered by Python Pillow and Streamlit controls. It automatically designs the latest post generated and compliance-validated in the Generate tab; copy generation stays on the app's configured Gemini/Ollama and compliance-validation path.
 
 #### Key Features & Controls:
 - **Aspect Ratio Presets**:
@@ -389,6 +389,7 @@ fca_marketing_app/
 ├── compliance_validator.py  # Independent post-generation compliance validator
 ├── fca_monitor.py           # Web/PDF scraper, SHA-256 hasher, & post flagger
 ├── post_studio.py           # Pillow graphic canvas engine & layout manager
+├── post_studio_ai.py        # Design studio UI wired to FCA-app generated content
 ├── db.py                    # PostgreSQL connection pool & query helpers
 ├── config.py                # Environment variable reader & settings fallback
 ├── monitor_cli.py           # CLI entrypoint for background scheduled checks
