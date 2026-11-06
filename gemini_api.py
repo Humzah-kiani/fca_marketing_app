@@ -42,7 +42,10 @@ def generate_interaction(
             "max_output_tokens": max_output_tokens,
         },
         api_version=GEMINI_API_VERSION,
-        response_mime_type="application/json",
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+        },
     )
     text = getattr(interaction, "output_text", "")
     if not text:

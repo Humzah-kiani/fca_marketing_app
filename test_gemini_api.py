@@ -32,7 +32,11 @@ def test_generate_interaction_uses_interactions_api_and_requested_model(monkeypa
         "max_output_tokens": 384,
     }
     assert calls["api_version"] == "v1beta"
-    assert calls["response_mime_type"] == "application/json"
+    assert calls["response_format"] == {
+        "type": "text",
+        "mime_type": "application/json",
+    }
+    assert "response_mime_type" not in calls
 
 
 def test_client_uses_v1beta_for_json_response_mode(monkeypatch):
