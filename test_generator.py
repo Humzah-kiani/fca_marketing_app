@@ -105,6 +105,23 @@ def test_generate_with_gemini_tries_fallback_model_on_internal_error(monkeypatch
     assert calls == ["gemini-3.8-flash", "fallback-test-model"]
 
 
+def test_generate_with_gemini_uses_one_request_for_default_post_count(monkeypatch):
+    calls = []
+
+    def fake_gemini_call(system_prompt, user_prompt, max_tokens):
+        calls.append((system_prompt, user_prompt, max_tokens))
+        return '["First post", "Second post", "Third post"]'
+
+    monkeypatch.setattr(generator, "_gemini_call", fake_gemini_call)
+    monkeypatch.setattr(generator, "_reference_text", lambda: "Reference text")
+
+    result = _generate_with_gemini("Post", "Retirement", "", 3)
+
+    assert result == ["First post", "Second post", "Third post"]
+    assert len(calls) == 1
+    assert calls[0][2] == generator._max_tokens_for("Post", 3)
+
+
 def test_gemini_deadline_error_is_transient():
     assert _is_transient_gemini_error(RuntimeError("504 DEADLINE_EXCEEDED"))
 

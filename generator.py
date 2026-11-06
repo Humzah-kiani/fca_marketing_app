@@ -368,7 +368,11 @@ def _split(n: int, workers: int) -> list[int]:
 def _generate_with_gemini(format_type, category, guideline, num_posts) -> list:
     num_posts = max(num_posts, 1)
     system = _build_system_prompt(format_type, category, CATEGORY_NOTES.get(category, ""), _reference_text(), guideline, num_posts)
-    sizes = _split(num_posts, MAX_PARALLEL) if PARALLEL and num_posts > 1 else [num_posts]
+    sizes = (
+        _split(num_posts, MAX_PARALLEL)
+        if PARALLEL and num_posts > MAX_PARALLEL
+        else [num_posts]
+    )
     base_angle = int(uuid.uuid4().hex[:2], 16)
     offsets = [sum(sizes[:i]) for i in range(len(sizes))]
 

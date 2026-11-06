@@ -328,13 +328,24 @@ with tab_generate:
     )
 
     if st.button("Generate", type="primary"):
-        with st.spinner("Generating compliant text..."):
+        with st.status("Preparing generation...", expanded=False) as generation_status:
             try:
+                generation_status.update(label="Preparing FCA references...")
                 ensure_sections_seeded()
                 snapshot = get_current_snapshot()
+                generation_status.update(label="Generating text with Gemini...")
                 posts = generate_posts(format_type, category, guideline, int(num_posts))
+                generation_status.update(label="Checking generated text for compliance...")
                 validation_results = validate_posts(posts, format_type, category)
+                generation_status.update(
+                    label="Generation and compliance check complete.",
+                    state="complete",
+                )
             except Exception as e:
+                generation_status.update(
+                    label="Generation stopped before completion.",
+                    state="error",
+                )
                 st.error(f"Generation stopped: {e}")
                 posts = None
 
