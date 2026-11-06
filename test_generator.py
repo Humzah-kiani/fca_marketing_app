@@ -67,62 +67,41 @@ def test_dedupe_posts_removes_duplicates():
 def test_generate_with_gemini_tries_fallback_model_on_404_or_503(monkeypatch):
     calls = []
 
-    class FakeClient:
-        def __init__(self, api_key):
-            self.api_key = api_key
-
-        class models:
-            @staticmethod
-            def generate_content(model, *args, **kwargs):
-                calls.append(model)
-                if model == "gemini-3.8-flash":
-                    raise RuntimeError("404 NOT_FOUND: This model models/gemini-2.5-flash is no longer available to new users.")
-                return type("Response", (), {"text": '["Fallback post"]'})()
+    def fake_gemini_text(model, system_prompt, user_prompt, max_tokens):
+        calls.append(model)
+        if model == "gemini-3.8-flash":
+            raise RuntimeError("503 UNAVAILABLE")
+        return '["Fallback post"]'
 
     monkeypatch.setattr(generator, "GEMINI_MODEL", "gemini-3.8-flash")
     monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["fallback-test-model"])
-    monkeypatch.setattr(generator, "_gemini_client", lambda: FakeClient("test-key"))
-    monkeypatch.setattr(generator, "types", type("FakeTypes", (), {
-        "GenerateContentConfig": lambda **kwargs: kwargs,
-        "ThinkingConfig": lambda **kwargs: kwargs,
-    }))
+    monkeypatch.setattr(generator, "_gemini_text", fake_gemini_text)
     monkeypatch.setattr(generator, "_reference_text", lambda: "Reference text")
 
-    result = _generate_with_gemini("Post", "Retirement", "Campaign", 1)
+    result = generator._gemini_call("system", "user", 100)
 
-    assert result == ["Fallback post"]
+    assert result == '["Fallback post"]'
     assert calls == ["gemini-3.8-flash", "fallback-test-model"]
 
 
 def test_generate_with_gemini_tries_fallback_model_on_internal_error(monkeypatch):
     calls = []
 
-    class FakeClient:
-        def __init__(self, api_key):
-            self.api_key = api_key
-
-        class models:
-            @staticmethod
-            def generate_content(model, *args, **kwargs):
-                calls.append(model)
-                if model == "gemini-3.8-flash":
-                    raise RuntimeError(
-                        "500 INTERNAL: {'error': {'message': 'Internal error encountered.'}}"
-                    )
-                return type("Response", (), {"text": '["Fallback post"]'})()
+    def fake_gemini_text(model, system_prompt, user_prompt, max_tokens):
+        calls.append(model)
+        if model == "gemini-3.8-flash":
+            raise RuntimeError(
+                "500 INTERNAL: {'error': {'message': 'Internal error encountered.'}}"
+            )
+        return '["Fallback post"]'
 
     monkeypatch.setattr(generator, "GEMINI_MODEL", "gemini-3.8-flash")
     monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["fallback-test-model"])
-    monkeypatch.setattr(generator, "_gemini_client", lambda: FakeClient("test-key"))
-    monkeypatch.setattr(generator, "types", type("FakeTypes", (), {
-        "GenerateContentConfig": lambda **kwargs: kwargs,
-        "ThinkingConfig": lambda **kwargs: kwargs,
-    }))
-    monkeypatch.setattr(generator, "_reference_text", lambda: "Reference text")
+    monkeypatch.setattr(generator, "_gemini_text", fake_gemini_text)
 
-    result = _generate_with_gemini("Post", "Retirement", "Campaign", 1)
+    result = generator._gemini_call("system", "user", 100)
 
-    assert result == ["Fallback post"]
+    assert result == '["Fallback post"]'
     assert calls == ["gemini-3.8-flash", "fallback-test-model"]
 
 
@@ -130,19 +109,31 @@ def test_gemini_deadline_error_is_transient():
     assert _is_transient_gemini_error(RuntimeError("504 DEADLINE_EXCEEDED"))
 
 
-def test_gemini_transient_failure_returns_local_posts_and_records_status(monkeypatch):
+def test_gemini_transient_failure_surfaces_api_error_instead_of_local_copy(monkeypatch):
     monkeypatch.setattr(generator, "AI_PROVIDER", "gemini")
     monkeypatch.setattr(generator, "GEMINI_API_KEY", "test-key")
     monkeypatch.setattr(generator, "_generate_with_gemini", lambda *args: (_ for _ in ()).throw(
         RuntimeError("504 DEADLINE_EXCEEDED")
     ))
-    monkeypatch.setattr(generator, "GRACEFUL_FALLBACK", True)
 
-    posts = generator.generate_posts("Post", "Retirement", "", 1)
+    with pytest.raises(RuntimeError, match="504 DEADLINE_EXCEEDED"):
+        generator.generate_posts("Post", "Retirement", "", 1)
 
-    assert len(posts) == 1
-    assert generator.last_generation_info["used_fallback"] is True
-    assert "504" in generator.last_generation_info["error"]
+
+def test_gemini_does_not_fill_in_missing_posts_with_local_copy(monkeypatch):
+    monkeypatch.setattr(generator, "AI_PROVIDER", "gemini")
+    monkeypatch.setattr(generator, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        generator,
+        "_generate_with_gemini",
+        lambda *args: [
+            "Planning starts here\n\nKnow your options.\n\n"
+            "Values can fall as well as rise.\n\nSpeak to a regulated adviser."
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="Gemini generation failed: AI returned 1 of 2 requested posts"):
+        generator.generate_posts("Post", "Retirement", "", 2)
 
 
 def test_gemini_model_candidates_use_configured_models_without_discovery(monkeypatch):

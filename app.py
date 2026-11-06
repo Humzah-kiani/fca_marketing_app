@@ -18,7 +18,7 @@ from fca_monitor import (
     get_sections_reference_text,
     check_for_updates,
 )
-from generator import generate_posts, last_generation_info
+from generator import generate_posts
 
 st.set_page_config(
     page_title="FCA Compliant Marketing Generator",
@@ -339,11 +339,6 @@ with tab_generate:
                 posts = None
 
             if posts:
-                if last_generation_info["used_fallback"]:
-                    st.warning(
-                        "Gemini was temporarily unavailable, so local template copy was used. "
-                        "Review it carefully before use."
-                    )
                 failed_results = [
                     result for result in validation_results if not result["passed"]
                 ]

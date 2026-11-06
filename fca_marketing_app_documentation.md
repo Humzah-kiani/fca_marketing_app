@@ -36,7 +36,7 @@ flowchart TD
 
     subgraph AI ["AI Provider Integrations"]
         GEM["Google Gemini API (Default: gemini-3.8-flash)"]
-        OLL["Ollama Local LLM (Fallback: qwen2.5:3b-instruct)"]
+        OLL["Optional Ollama Local LLM (qwen2.5:3b-instruct)"]
     end
 
     subgraph External ["External Services & Storage"]
@@ -63,6 +63,14 @@ flowchart TD
     T5 --> DB
     DB --> PG_DB
 ```
+
+Gemini generation and independent compliance review use the Google GenAI SDK's
+Interactions API via `gemini_api.py`; they do not call the legacy
+`generateContent` endpoint. Set `GEMINI_API_KEY` in the deployment secrets and
+use `GEMINI_MODEL=gemini-3.8-flash` (the default). Gemini API errors are shown
+as generation failures rather than being replaced with local template copy.
+Compliance validation also fails closed if the independent AI review cannot
+complete. Ollama can be selected explicitly with `AI_PROVIDER=ollama`.
 
 ---
 
@@ -386,6 +394,7 @@ To run regulatory checks automatically on a daily schedule, configure a cron job
 fca_marketing_app/
 ├── app.py                   # Main Streamlit UI entrypoint (Tabs 1-5)
 ├── generator.py             # Prompt builder & Gemini/Ollama generation interface
+├── gemini_api.py            # Shared Gemini Interactions API client
 ├── compliance_validator.py  # Independent post-generation compliance validator
 ├── fca_monitor.py           # Web/PDF scraper, SHA-256 hasher, & post flagger
 ├── post_studio.py           # Pillow graphic canvas engine & layout manager

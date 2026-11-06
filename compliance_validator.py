@@ -5,22 +5,15 @@ import json
 
 import requests
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:  # pragma: no cover - optional cloud dependency
-    genai = None
-    types = None
-
 from config import (
     AI_PROVIDER,
     GEMINI_API_KEY,
-    GEMINI_FALLBACK_MODELS,
     GEMINI_MODEL,
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
 )
 from fca_monitor import get_sections_reference_text
+from gemini_api import generate_interaction
 
 
 VALIDATION_PROMPT = """You are an independent UK financial promotions compliance reviewer.
@@ -87,15 +80,12 @@ def _parse_result(raw: str) -> dict:
     return result
 
 
-def _fallback_validation(post_text: str) -> dict:
-    """Local fallback validation when no AI provider is reachable."""
-    summary = (
-        "Offline fallback validation applied. Please review the final text manually before use."
-    )
+def _fallback_validation(reason: str) -> dict:
+    """Fail closed when an independent AI compliance review is unavailable."""
     return {
-        "passed": True,
-        "issues": [],
-        "summary": summary,
+        "passed": False,
+        "issues": [reason],
+        "summary": "Independent compliance validation could not be completed; content was not approved.",
     }
 
 
@@ -176,42 +166,20 @@ def validate_post(post_text: str, format_type: str, category: str) -> dict:
         )
 
         if (AI_PROVIDER == "gemini" or GEMINI_API_KEY) and AI_PROVIDER != "ollama":
-            if genai is None or types is None:
-                raise RuntimeError("Google GenAI SDK is not installed.")
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            models_to_try = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
-            for model_name in models_to_try:
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents="Return the independent compliance review for this draft.",
-                        config=types.GenerateContentConfig(
-                            system_instruction=prompt,
-                            max_output_tokens=1000,
-                            temperature=0.1,
-                        ),
-                    )
-                    raw = getattr(response, "text", "")
-                    if not raw and hasattr(response, "candidates"):
-                        parts = []
-                        for candidate in response.candidates:
-                            content = getattr(candidate, "content", None)
-                            for part in getattr(content, "parts", []) or []:
-                                text = getattr(part, "text", "")
-                                if text:
-                                    parts.append(text)
-                        raw = "".join(parts)
-                    if raw:
-                        return _parse_result(raw)
-                except Exception:
-                    continue
+            raw = generate_interaction(
+                GEMINI_MODEL,
+                prompt,
+                "Return the independent compliance review for this draft.",
+                max_output_tokens=1000,
+            )
+            return _parse_result(raw)
         elif AI_PROVIDER == "ollama":
             raw = _call_ollama_json(prompt)
             return _parse_result(raw)
         
-        return _fallback_validation(post_text)
-    except Exception:
-        return _fallback_validation(post_text)
+        return _fallback_validation("No AI compliance validator is configured.")
+    except Exception as exc:
+        return _fallback_validation(f"AI compliance validation failed: {exc}")
 
 
 def validate_posts(posts: list, format_type: str, category: str) -> list:

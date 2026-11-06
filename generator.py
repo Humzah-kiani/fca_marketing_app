@@ -21,13 +21,6 @@ from functools import lru_cache
 
 import requests
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:  # pragma: no cover
-    genai = None
-    types = None
-
 from config import (
     AI_PROVIDER,
     GEMINI_API_KEY,
@@ -37,6 +30,7 @@ from config import (
     OLLAMA_MODEL,
 )
 from fca_monitor import get_sections_reference_text
+from gemini_api import generate_interaction
 
 # --------------------------------------------------------------------------- #
 # Knobs
@@ -44,9 +38,6 @@ from fca_monitor import get_sections_reference_text
 PARALLEL = True               # split multi-post requests into parallel Gemini calls
 MAX_PARALLEL = 4
 MAX_MODEL_TRIES = 2
-GEMINI_TIMEOUT_MS = 60_000    # also sent to Google as the server-side deadline - too low causes 504 DEADLINE_EXCEEDED
-GRACEFUL_FALLBACK = True      # on overload/timeout, return local copy instead of failing the whole generation
-last_generation_info = {"used_fallback": False, "error": ""}   # read this in your UI to show a warning
 OLLAMA_TIMEOUT_S = 90
 REFERENCE_CHARS = 600
 
@@ -107,14 +98,6 @@ def _reference_text() -> str:
         _REF["v"], _REF["t"] = (get_sections_reference_text() or ""), now
     return _REF["v"] or ("(No cached FCA reference text yet - run 'Run compliance check now' "
                          "on the Compliance Monitor tab once.)")
-
-
-@lru_cache(maxsize=1)
-def _gemini_client():
-    try:
-        return genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS))
-    except Exception:
-        return genai.Client(api_key=GEMINI_API_KEY)
 
 
 # --------------------------------------------------------------------------- #
@@ -360,47 +343,19 @@ def _is_transient_gemini_error(exc: Exception) -> bool:
                                   "no longer available"))
 
 
-def _gemini_text(client, model: str, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
-    def cfg(think_off: bool, tokens: int):
-        kw = dict(system_instruction=system_prompt, max_output_tokens=tokens, temperature=0.9, top_p=0.9,
-                  response_mime_type="application/json")
-        if think_off:
-            kw["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-        return types.GenerateContentConfig(**kw)
-
-    try:
-        resp = client.models.generate_content(model=model, contents=user_prompt, config=cfg(True, max_tokens))
-    except Exception as exc:
-        # Older SDK / model that can't turn thinking off -> plain call with headroom for its reasoning tokens.
-        if not isinstance(exc, (AttributeError, TypeError)) and "thinking" not in str(exc).lower():
-            raise
-        resp = client.models.generate_content(model=model, contents=user_prompt, config=cfg(False, max_tokens + 1024))
-
-    raw = getattr(resp, "text", "") or ""
-    if not raw:
-        parts = []
-        for cand in getattr(resp, "candidates", None) or []:
-            for part in getattr(getattr(cand, "content", None), "parts", None) or []:
-                if getattr(part, "text", ""):
-                    parts.append(part.text)
-        raw = "".join(parts)
-    return raw
+def _gemini_text(model: str, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+    return generate_interaction(model, system_prompt, user_prompt, max_tokens)
 
 
 def _gemini_call(system_prompt: str, user_prompt: str, max_tokens: int) -> str:
-    client, last = _gemini_client(), None
-    models = _gemini_model_candidates()[:MAX_MODEL_TRIES]
-    if len(models) == 1:
-        models = models * 2  # only one model configured -> one quick retry on the same model
-    for i, model in enumerate(models):
+    last = None
+    for model in _gemini_model_candidates()[:MAX_MODEL_TRIES]:
         try:
-            return _gemini_text(client, model, system_prompt, user_prompt, max_tokens)
+            return _gemini_text(model, system_prompt, user_prompt, max_tokens)
         except Exception as exc:
             last = exc
             if not _is_transient_gemini_error(exc):
                 raise
-            if i < len(models) - 1:
-                time.sleep(0.7)
     raise last or RuntimeError("Gemini generation failed with no usable model candidates.")
 
 
@@ -411,40 +366,53 @@ def _split(n: int, workers: int) -> list[int]:
 
 
 def _generate_with_gemini(format_type, category, guideline, num_posts) -> list:
-    if genai is None or types is None:
-        raise RuntimeError("Google GenAI SDK is not installed.")
     num_posts = max(num_posts, 1)
     system = _build_system_prompt(format_type, category, CATEGORY_NOTES.get(category, ""), _reference_text(), guideline, num_posts)
     sizes = _split(num_posts, MAX_PARALLEL) if PARALLEL and num_posts > 1 else [num_posts]
     base_angle = int(uuid.uuid4().hex[:2], 16)
     offsets = [sum(sizes[:i]) for i in range(len(sizes))]
 
-    def job(size: int, offset: int) -> str:
+    def job(size: int, offset: int) -> list[str]:
         token = uuid.uuid4().hex[:8]
         sys_prompt = system.replace(f"exactly {num_posts} strings", f"exactly {size} strings")
-        return _gemini_call(sys_prompt, _build_user_prompt(format_type, category, size, token, base_angle + offset),
-                            _max_tokens_for(format_type, size))
+        raw = _gemini_call(
+            sys_prompt,
+            _build_user_prompt(format_type, category, size, token, base_angle + offset),
+            _max_tokens_for(format_type, size),
+        )
+        posts = _parse_posts(raw)
+        if len(posts) != size:
+            raise RuntimeError(f"Gemini returned {len(posts)} of {size} requested posts.")
+        return posts
 
     if len(sizes) == 1:
-        return _dedupe_posts(_parse_posts(job(sizes[0], 0)))[:num_posts]
+        posts = _dedupe_posts(job(sizes[0], 0))
+        if len(posts) != num_posts:
+            raise RuntimeError("Gemini returned duplicate posts instead of the requested number of distinct posts.")
+        return posts
 
     posts, errors = [], []
     with ThreadPoolExecutor(max_workers=len(sizes)) as pool:
         futures = [pool.submit(job, s, o) for s, o in zip(sizes, offsets)]
         for fut in futures:
             try:
-                posts += _parse_posts(fut.result())
+                posts += fut.result()
             except Exception as exc:
                 errors.append(exc)
-    if not posts and errors:
+    if errors:
         raise errors[0]
-    return _dedupe_posts(posts)[:num_posts]
+    unique_posts = _dedupe_posts(posts)
+    if len(unique_posts) != num_posts:
+        raise RuntimeError("Gemini returned duplicate posts instead of the requested number of distinct posts.")
+    return unique_posts
 
 
 # --------------------------------------------------------------------------- #
-# Collect: one AI round -> trim -> dedupe -> instant local top-up
+# Collect generated output and optionally top up local-provider results.
 # --------------------------------------------------------------------------- #
-def _retry_unique_posts(generator_func, format_type, category, guideline, num_posts):
+def _retry_unique_posts(
+    generator_func, format_type, category, guideline, num_posts, allow_local_top_up=True
+):
     target = max(num_posts, 1)
     collected: list[str] = []
     seen: set[str] = set()
@@ -458,7 +426,7 @@ def _retry_unique_posts(generator_func, format_type, category, guideline, num_po
             seen.add(key)
             collected.append(fixed)
 
-    if len(collected) < target:
+    if len(collected) < target and allow_local_top_up:
         for filler in _fallback_posts(format_type, category, guideline, target + 5, start_index=uuid.uuid4().int % 5):
             key = " ".join(filler.lower().split())
             if key not in seen:
@@ -466,23 +434,27 @@ def _retry_unique_posts(generator_func, format_type, category, guideline, num_po
                 collected.append(filler)
                 if len(collected) >= target:
                     break
+    elif len(collected) < target:
+        raise RuntimeError(f"AI returned {len(collected)} of {target} requested posts.")
     return collected[:target]
 
 
 def _run_gemini(format_type, category, guideline, target):
-    last_generation_info.update(used_fallback=False, error="")
     try:
-        return _retry_unique_posts(_generate_with_gemini, format_type, category, guideline, target)
+        return _retry_unique_posts(
+            _generate_with_gemini,
+            format_type,
+            category,
+            guideline,
+            target,
+            allow_local_top_up=False,
+        )
     except Exception as exc:
-        if GRACEFUL_FALLBACK and _is_transient_gemini_error(exc):
-            last_generation_info.update(used_fallback=True, error=str(exc))
-            return _fallback_posts(format_type, category, guideline, target, start_index=uuid.uuid4().int % 5)
         raise RuntimeError(f"Gemini generation failed: {exc}") from exc
 
 
 def generate_posts(format_type: str, category: str, guideline: str, num_posts: int) -> list:
     target = max(num_posts, 1)
-    last_generation_info.update(used_fallback=False, error="")
 
     if AI_PROVIDER == "gemini":
         if not GEMINI_API_KEY:
@@ -503,12 +475,15 @@ def generate_posts(format_type: str, category: str, guideline: str, num_posts: i
 
 def warm_up() -> None:
     """Call once at app start (e.g. inside st.cache_resource) so the first user request is fast."""
-    try:
-        _reference_text()
-        if AI_PROVIDER == "ollama":
-            requests.post(f"{OLLAMA_BASE_URL}/api/generate", timeout=OLLAMA_TIMEOUT_S,
-                          json={"model": _resolve_ollama_model(), "prompt": "", "keep_alive": "30m", "stream": False})
-        elif genai is not None and GEMINI_API_KEY:
-            _gemini_client()
-    except Exception:
-        pass
+    _reference_text()
+    if AI_PROVIDER == "ollama":
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            timeout=OLLAMA_TIMEOUT_S,
+            json={"model": _resolve_ollama_model(), "prompt": "", "keep_alive": "30m", "stream": False},
+        )
+        response.raise_for_status()
+    elif GEMINI_API_KEY:
+        from gemini_api import warm_up as warm_up_gemini
+
+        warm_up_gemini()
