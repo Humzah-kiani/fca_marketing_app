@@ -30,7 +30,6 @@ def test_generate_interaction_uses_interactions_api_and_requested_model(monkeypa
     assert calls["input"] == "Write one post."
     assert calls["generation_config"] == {
         "max_output_tokens": 384,
-        "thinking_level": "minimal",
     }
     assert calls["api_version"] == "v1beta"
     assert calls["response_mime_type"] == "application/json"

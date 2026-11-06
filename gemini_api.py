@@ -40,7 +40,6 @@ def generate_interaction(
         system_instruction=system_instruction,
         generation_config={
             "max_output_tokens": max_output_tokens,
-            "thinking_level": "minimal",
         },
         api_version=GEMINI_API_VERSION,
         response_mime_type="application/json",

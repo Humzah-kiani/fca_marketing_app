@@ -4,7 +4,7 @@ Optimized FCA-aware copy generator (Gemini / Ollama). Same public API:
 Optional: call warm_up() once at app start to remove first-request latency.
 
 Speed work
-  * Gemini thinking disabled + JSON mode (no truncated/garbled output -> no fallbacks).
+  * JSON mode without an explicit thinking-level override (uses model defaults).
   * Realistic token budgets (old budget could cut JSON mid-way).
   * Over-long copy is trimmed locally instead of discarded.
   * Multi-post requests run as parallel Gemini calls.
