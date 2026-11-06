@@ -11,6 +11,7 @@ except ImportError:  # pragma: no cover - optional cloud dependency
 from config import GEMINI_API_KEY
 
 GEMINI_TIMEOUT_MS = 60_000
+GEMINI_API_VERSION = "v1beta"
 
 
 @lru_cache(maxsize=1)
@@ -20,7 +21,7 @@ def _client():
     return genai.Client(
         api_key=GEMINI_API_KEY,
         http_options=types.HttpOptions(
-            api_version="v1beta",
+            api_version=GEMINI_API_VERSION,
             timeout=GEMINI_TIMEOUT_MS,
         ),
     )
@@ -41,6 +42,7 @@ def generate_interaction(
             "max_output_tokens": max_output_tokens,
             "thinking_level": "minimal",
         },
+        api_version=GEMINI_API_VERSION,
         response_mime_type="application/json",
     )
     text = getattr(interaction, "output_text", "")
