@@ -48,6 +48,38 @@ Set passed to false whenever a material issue is present. Use an empty issues
 array only when the draft passes all rules.
 """
 
+BATCH_VALIDATION_PROMPT = """You are an independent UK financial promotions compliance reviewer.
+Review each supplied draft independently against the FCA reference material and rules below.
+Do not compare drafts or let one draft's issues affect another draft's result.
+
+Rules:
+- The communication must be clear, fair, and not misleading.
+- Do not promise or imply guaranteed returns or outcomes.
+- Benefits must be balanced with relevant risks and limitations.
+- Do not use high-pressure or false-urgency language.
+- Do not give personalised financial advice.
+- Do not imply FCA approval or endorsement.
+- Use plain English and avoid unsupported factual claims.
+- Apply the category-specific requirement: {category_note}
+
+Current FCA reference material:
+{reference_text}
+
+Format: {format_type}
+Category: {category}
+Drafts to review, in order:
+{drafts_json}
+
+Return ONLY valid JSON in this exact shape, with one result per draft in the same order:
+{{
+  "results": [
+    {{"passed": true or false, "issues": ["specific issue"], "summary": "brief review summary"}}
+  ]
+}}
+Set passed to false whenever a material issue is present. Use an empty issues array only
+when that draft passes all rules. Return exactly {draft_count} results.
+"""
+
 
 CATEGORY_NOTES = {
     "Retirement": "Do not imply guaranteed retirement income; mention that pension or investment value can go down as well as up.",
@@ -183,9 +215,52 @@ def validate_post(post_text: str, format_type: str, category: str) -> dict:
 
 
 def validate_posts(posts: list, format_type: str, category: str) -> list:
-    """Validate each post independently, concurrently, and in input order."""
+    """Validate posts independently and preserve input order."""
     if not posts:
         return []
+
+    if (AI_PROVIDER == "gemini" or GEMINI_API_KEY) and AI_PROVIDER != "ollama":
+        try:
+            reference_text = get_sections_reference_text()
+            if not reference_text:
+                reference_text = (
+                    "FCA Handbook Core Guidance (COBS 4 Financial Promotions & PRIN Principles for Businesses):\n"
+                    "- Communications must be clear, fair, and not misleading.\n"
+                    "- Never promise or imply guaranteed returns or outcomes.\n"
+                    "- Capital and pension investment values can go down as well as up.\n"
+                    "- Any stated benefit must be balanced with clear risk statements.\n"
+                    "- Avoid high pressure or false urgency."
+                )
+
+            prompt = BATCH_VALIDATION_PROMPT.format(
+                category_note=CATEGORY_NOTES.get(category, ""),
+                reference_text=reference_text[:12000],
+                format_type=format_type,
+                category=category,
+                drafts_json=json.dumps(posts, ensure_ascii=False),
+                draft_count=len(posts),
+            )
+            raw = generate_interaction(
+                GEMINI_MODEL,
+                prompt,
+                "Return one independent compliance review for each draft, in order.",
+                max_output_tokens=min(2000, max(384, len(posts) * 120 + 100)),
+            )
+            result_json = raw.strip()
+            start_idx = result_json.find("{")
+            end_idx = result_json.rfind("}")
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                result_json = result_json[start_idx : end_idx + 1]
+            payload = json.loads(result_json)
+            results = payload.get("results") if isinstance(payload, dict) else None
+            if not isinstance(results, list) or len(results) != len(posts):
+                raise ValueError("Validator response did not contain one result per draft")
+            return [_parse_result(json.dumps(result)) for result in results]
+        except Exception as exc:
+            return [
+                _fallback_validation(f"AI compliance validation failed: {exc}")
+                for _ in posts
+            ]
 
     validate = partial(validate_post, format_type=format_type, category=category)
     with ThreadPoolExecutor(max_workers=min(4, len(posts))) as executor:

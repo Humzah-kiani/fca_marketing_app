@@ -12,11 +12,67 @@ def test_validate_posts_runs_independently_and_preserves_input_order(monkeypatch
         barrier.wait(timeout=2)
         return {"post": post_text}
 
+    monkeypatch.setattr(compliance_validator, "AI_PROVIDER", "ollama")
+    monkeypatch.setattr(compliance_validator, "GEMINI_API_KEY", "")
     monkeypatch.setattr(compliance_validator, "validate_post", fake_validate_post)
 
     results = compliance_validator.validate_posts(["first", "second", "third"], "Post", "Retirement")
 
     assert results == [{"post": "first"}, {"post": "second"}, {"post": "third"}]
+
+
+def test_validate_posts_batches_gemini_reviews_in_input_order(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_generate_interaction(model, system_instruction, user_input, max_output_tokens):
+        calls["count"] += 1
+        calls["model"] = model
+        calls["system_instruction"] = system_instruction
+        calls["user_input"] = user_input
+        calls["max_output_tokens"] = max_output_tokens
+        return (
+            '{"results": ['
+            '{"passed": true, "issues": [], "summary": "First passed."},'
+            '{"passed": false, "issues": ["Missing risk statement."], "summary": "Second failed."}'
+            ']}'
+        )
+
+    monkeypatch.setattr(compliance_validator, "AI_PROVIDER", "gemini")
+    monkeypatch.setattr(compliance_validator, "GEMINI_MODEL", "gemini-3.8-flash")
+    monkeypatch.setattr(compliance_validator, "get_sections_reference_text", lambda: "FCA reference")
+    monkeypatch.setattr(compliance_validator, "generate_interaction", fake_generate_interaction)
+
+    results = compliance_validator.validate_posts(
+        ["First draft", "Second draft"], "Post", "Retirement"
+    )
+
+    assert results == [
+        {"passed": True, "issues": [], "summary": "First passed."},
+        {"passed": False, "issues": ["Missing risk statement."], "summary": "Second failed."},
+    ]
+    assert calls["model"] == "gemini-3.8-flash"
+    assert "review each supplied draft independently" in calls["system_instruction"].lower()
+    assert "First draft" in calls["system_instruction"]
+    assert "Second draft" in calls["system_instruction"]
+    assert calls["user_input"] == "Return one independent compliance review for each draft, in order."
+    assert calls["max_output_tokens"] == 384
+    assert calls["count"] == 1
+
+
+def test_validate_posts_fails_closed_for_invalid_batched_gemini_response(monkeypatch):
+    monkeypatch.setattr(compliance_validator, "AI_PROVIDER", "gemini")
+    monkeypatch.setattr(compliance_validator, "get_sections_reference_text", lambda: "FCA reference")
+    monkeypatch.setattr(
+        compliance_validator,
+        "generate_interaction",
+        lambda *args, **kwargs: '{"results": []}',
+    )
+
+    results = compliance_validator.validate_posts(["First", "Second"], "Post", "Retirement")
+
+    assert len(results) == 2
+    assert all(result["passed"] is False for result in results)
+    assert all("one result per draft" in result["issues"][0] for result in results)
 
 
 def test_validate_posts_handles_empty_input():
