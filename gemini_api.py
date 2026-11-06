@@ -34,11 +34,11 @@ def generate_interaction(
         model=model,
         input=user_input,
         system_instruction=system_instruction,
-        generation_config=types.GenerationConfig(
-            max_output_tokens=max_output_tokens,
-            response_mime_type="application/json",
-            thinking_config=types.GenerationConfigThinkingConfig(thinking_level="minimal"),
-        ),
+        generation_config={
+            "max_output_tokens": max_output_tokens,
+            "thinking_level": "minimal",
+        },
+        response_mime_type="application/json",
     )
     text = getattr(interaction, "output_text", "")
     if not text:

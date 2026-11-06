@@ -28,5 +28,8 @@ def test_generate_interaction_uses_interactions_api_and_requested_model(monkeypa
     assert calls["model"] == "gemini-3.8-flash"
     assert calls["system_instruction"] == "Return a JSON array."
     assert calls["input"] == "Write one post."
-    assert calls["generation_config"].max_output_tokens == 384
-    assert calls["generation_config"].response_mime_type == "application/json"
+    assert calls["generation_config"] == {
+        "max_output_tokens": 384,
+        "thinking_level": "minimal",
+    }
+    assert calls["response_mime_type"] == "application/json"
