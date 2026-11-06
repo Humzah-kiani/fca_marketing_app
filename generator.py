@@ -1,15 +1,22 @@
 """
-Generates SHORT, punchy, FCA-aware marketing copy using the Google Gemini API
-(or Ollama), grounded in the currently cached FCA Handbook/guidance text
-(see fca_monitor.py).
+Optimized FCA-aware copy generator (Gemini / Ollama). Same public API:
+    generate_posts(format_type, category, guideline, num_posts) -> list[str]
+Optional: call warm_up() once at app start to remove first-request latency.
 
-Output style:
-  * Post     -> hook headline + 2-3 punchy lines + one-line risk note + one-line CTA
-  * Carousel -> 5 slides, one short idea per slide (hook -> value -> value -> risk -> CTA)
+Speed work
+  * Gemini thinking disabled + JSON mode (no truncated/garbled output -> no fallbacks).
+  * Realistic token budgets (old budget could cut JSON mid-way).
+  * Over-long copy is trimmed locally instead of discarded.
+  * Multi-post requests run as parallel Gemini calls.
+  * Cached Gemini client, FCA reference text and Ollama model lookup; request timeouts.
+  * Only 2 models tried, and only for transient errors.
+  * Shorter prompt (fewer input tokens).
 """
 import json
 import re
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
 import requests
@@ -17,7 +24,7 @@ import requests
 try:
     from google import genai
     from google.genai import types
-except ImportError:  # pragma: no cover - optional cloud dependency
+except ImportError:  # pragma: no cover
     genai = None
     types = None
 
@@ -32,13 +39,20 @@ from config import (
 from fca_monitor import get_sections_reference_text
 
 # --------------------------------------------------------------------------- #
-# Length limits (tweak these to make copy shorter / longer)
+# Knobs
 # --------------------------------------------------------------------------- #
-POST_MAX_WORDS = 65             # whole post, including risk line + CTA
+PARALLEL = True               # split multi-post requests into parallel Gemini calls
+MAX_PARALLEL = 4
+MAX_MODEL_TRIES = 2
+GEMINI_TIMEOUT_MS = 20_000
+OLLAMA_TIMEOUT_S = 90
+REFERENCE_CHARS = 600
+
+POST_MAX_WORDS = 65
 POST_HEADLINE_MAX_WORDS = 10
 CAROUSEL_SLIDES = 5
-CAROUSEL_SLIDE_MAX_WORDS = 18   # per slide (after the "Slide N:" label)
-CAROUSEL_MAX_WORDS = 90         # whole carousel
+CAROUSEL_SLIDE_MAX_WORDS = 18
+CAROUSEL_MAX_WORDS = 90
 
 CATEGORY_NOTES = {
     "Retirement": "Do not imply guaranteed retirement income; note that pension/investment value can go down as well as up.",
@@ -51,130 +65,101 @@ CATEGORY_NOTES = {
     "Lifestyle": "Keep aspirational language honest — do not tie specific lifestyle outcomes to a financial product's performance.",
 }
 
-SYSTEM_PROMPT_TEMPLATE = """You are a UK financial promotions copywriter creating SHORT, scroll-stopping social media content for a regulated financial adviser brand.
+SYSTEM_PROMPT_TEMPLATE = """You are a UK financial promotions copywriter writing SHORT, scroll-stopping social content for a regulated adviser brand. Format: {format_type}. Category: "{category}". Punchy, modern, premium — never a paragraph or legal notice.
 
-Write {format_type} content for the "{category}" category. Think punchy, modern and premium — like a modern financial adviser social brand on Instagram/LinkedIn, NOT a paragraph, essay or legal notice.
-
-BREVITY IS THE #1 RULE:
+BREVITY IS RULE #1:
 {format_rules}
 
-Style rules:
-- Open with a strong hook: a bold question, a surprising truth, or a relatable moment.
-- Short sentences. Plain words. One idea per line. No jargon, no filler, no waffle.
-- Make it category-specific to {category} (real decisions, needs and moments), not generic finance talk.
-- Emojis: none, or one at most per asset, and only if it adds meaning.
-- No hashtags unless the adviser guideline asks for them.
-- Every asset must end with a soft, professional CTA (e.g. "Talk to a regulated adviser.").
+Style: strong hook (bold question, surprising truth or relatable moment); short sentences, plain words, one idea per line; specific to {category}; at most one emoji per asset (or none); no hashtags unless the guideline asks; end with a soft CTA.
 
-Compliance rules (keep them, but say them briefly):
-- Never promise or imply guaranteed returns, outcomes or benefits.
-- Balance any benefit with ONE short risk/suitability line (max 15 words).
-- No urgency pressure, fake scarcity or hard-selling.
-- No personal advice; invite the reader to speak with a regulated adviser.
-- Category note: {category_note}
+Compliance: never promise or imply guaranteed returns/outcomes; balance benefits with ONE short risk line (max 15 words); no urgency or hard-selling; no personal advice - invite the reader to speak with a regulated adviser. Category note: {category_note}
 
-Variety rules:
-- Every item in the array must be distinct and use a different hook, angle and structure.
-- Never reuse the same hook or opening words across items.
+Variety: every item must use a different hook, angle and structure.
 
-Reference material (background only — never quote it or copy its wording):
-{reference_text}
+Reference (background only, never quote): {reference_text}
+Adviser guideline: {guideline}
 
-Additional adviser guideline: {guideline}
+Output: ONLY a JSON array of exactly {num_posts} strings. No markdown or commentary. Use "\\n" for line breaks inside strings."""
 
-Output format:
-- Return ONLY a JSON array of exactly {num_posts} strings.
-- No markdown, no code fences, no commentary outside the array.
-- Use "\\n" for line breaks inside each string.
-- Each string is one complete {format_type} for the "{category}" category.
-"""
-
-POST_RULES = f"""- Each post is MAX {POST_MAX_WORDS} words in total.
-- Structure (each part on its own line, separated by a blank line):
+POST_RULES = f"""- Each post MAX {POST_MAX_WORDS} words, each part on its own line separated by a blank line:
   1) Headline hook (max {POST_HEADLINE_MAX_WORDS} words)
-  2) 2-3 punchy lines of value (max 15 words per line)
+  2) 2-3 punchy value lines (max 15 words each)
   3) One short risk line (max 15 words)
   4) One short CTA line (max 12 words)
-- No paragraphs. No block of text longer than one sentence.
-- Style example (do NOT copy it):
-  "Retiring soon? Your pension has a plan too.\\n\\nKnow your options.\\nCompare your income choices.\\nPlan around your life, not a number.\\n\\nPension values can fall as well as rise.\\n\\nSpeak to a regulated adviser." """
+- Example (do NOT copy): "Retiring soon? Your pension has a plan too.\\n\\nKnow your options.\\nCompare your income choices.\\n\\nPension values can fall as well as rise.\\n\\nSpeak to a regulated adviser." """
 
-CAROUSEL_RULES = f"""- Each carousel has EXACTLY {CAROUSEL_SLIDES} slides, MAX {CAROUSEL_SLIDE_MAX_WORDS} words per slide, {CAROUSEL_MAX_WORDS} words in total.
-- Format each slide on its own line as "Slide N: <text>".
-- Slide 1 = bold hook (a question or striking statement).
-- Slides 2-3 = one clear, practical idea each (a tip, a question to ask, a common mistake).
-- Slide 4 = short risk/suitability reminder.
-- Slide 5 = soft CTA to speak with a regulated adviser.
-- One idea per slide. No paragraphs.
-- Style example (do NOT copy it):
-  "Slide 1: Thinking about your pension?\\nSlide 2: Know what you want your money to do.\\nSlide 3: Compare options before you commit.\\nSlide 4: Values can fall as well as rise.\\nSlide 5: Speak to a regulated adviser." """
+CAROUSEL_RULES = f"""- EXACTLY {CAROUSEL_SLIDES} slides, MAX {CAROUSEL_SLIDE_MAX_WORDS} words each, one per line as "Slide N: <text>".
+- 1 = bold hook; 2-3 = one practical idea each; 4 = short risk reminder; 5 = soft CTA to speak with a regulated adviser.
+- Example (do NOT copy): "Slide 1: Thinking about your pension?\\nSlide 2: Know what you want your money to do.\\nSlide 3: Compare options before you commit.\\nSlide 4: Values can fall as well as rise.\\nSlide 5: Speak to a regulated adviser." """
 
 
 # --------------------------------------------------------------------------- #
-# Prompt builders
+# Cached helpers
 # --------------------------------------------------------------------------- #
-def _build_system_prompt(format_type: str, category: str, category_note: str, reference_text: str, guideline: str, num_posts: int) -> str:
-    """Build a compact, category-specific prompt that enforces short-form output."""
-    format_rules = CAROUSEL_RULES if format_type == "Carousel" else POST_RULES
+_REF = {"t": 0.0, "v": ""}
+
+
+def _reference_text() -> str:
+    now = time.monotonic()
+    if not _REF["v"] or now - _REF["t"] > 600:
+        _REF["v"], _REF["t"] = (get_sections_reference_text() or ""), now
+    return _REF["v"] or ("(No cached FCA reference text yet - run 'Run compliance check now' "
+                         "on the Compliance Monitor tab once.)")
+
+
+@lru_cache(maxsize=1)
+def _gemini_client():
+    try:
+        return genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS))
+    except Exception:
+        return genai.Client(api_key=GEMINI_API_KEY)
+
+
+# --------------------------------------------------------------------------- #
+# Prompts
+# --------------------------------------------------------------------------- #
+def _build_system_prompt(format_type, category, category_note, reference_text, guideline, num_posts) -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(
         format_type=format_type,
         category=category,
         category_note=category_note or "(none)",
-        format_rules=format_rules,
-        reference_text=(reference_text or "(No additional FCA text available)")[:1500],
-        guideline=(guideline or "(none provided)")[:300],
+        format_rules=CAROUSEL_RULES if format_type == "Carousel" else POST_RULES,
+        reference_text=(reference_text or "(none)")[:REFERENCE_CHARS],
+        guideline=(guideline or "(none)")[:300],
         num_posts=num_posts,
     )
 
 
-def _build_user_prompt(
-    format_type: str,
-    category: str,
-    num_posts: int,
-    variation_token: str | None = None,
-    angle_seed: int | None = None,
-) -> str:
-    """Add a generation-specific seed so every retry uses a fresh angle."""
+_ANGLES = [
+    "a smart question that challenges an assumption",
+    "a common mistake and how to avoid it",
+    "a quick checklist of things to consider",
+    "a relatable life moment that triggers this decision",
+    "a myth vs reality",
+    "benefit balanced with realistic risk",
+]
+
+
+def _build_user_prompt(format_type, category, num_posts, variation_token=None, angle_seed=None) -> str:
     variation_token = variation_token or uuid.uuid4().hex[:8]
     angle_seed = angle_seed if angle_seed is not None else int(variation_token[:2], 16)
-    angle_options = [
-        "a smart question that challenges an assumption",
-        "a common mistake and how to avoid it",
-        "a quick checklist of things to consider",
-        "a relatable life moment that triggers this decision",
-        "a myth vs reality",
-        "benefit balanced with realistic risk",
-    ]
-    angles = [
-        angle_options[(angle_seed + offset) % len(angle_options)]
-        for offset in range(min(num_posts, len(angle_options)))
-    ]
-    serialised_angles = "; ".join(f"{i + 1}) {angle}" for i, angle in enumerate(angles))
-
-    if format_type == "Carousel":
-        limit = f"exactly {CAROUSEL_SLIDES} slides, max {CAROUSEL_SLIDE_MAX_WORDS} words each"
-    else:
-        limit = f"max {POST_MAX_WORDS} words each"
-
-    return (
-        f"Create {num_posts} distinct, SHORT {format_type.lower()} assets for the '{category}' category ({limit}). "
-        f"Generation attempt {variation_token}. Use these angles in order: {serialised_angles}. "
-        f"Keep it punchy and scannable — no paragraphs. Each must be tailored to {category} "
-        f"and must not reuse the same hook, wording or structure as another."
-    )
+    angles = "; ".join(f"{i + 1}) {_ANGLES[(angle_seed + i) % len(_ANGLES)]}" for i in range(min(num_posts, len(_ANGLES))))
+    limit = (f"exactly {CAROUSEL_SLIDES} slides, max {CAROUSEL_SLIDE_MAX_WORDS} words each"
+             if format_type == "Carousel" else f"max {POST_MAX_WORDS} words each")
+    return (f"Create {num_posts} distinct SHORT {format_type.lower()} assets for '{category}' ({limit}). "
+            f"Seed {variation_token}. Angles in order: {angles}. Punchy, scannable, no repeated hooks.")
 
 
 # --------------------------------------------------------------------------- #
-# Parsing / cleaning / validation
+# Parsing + local trimming
 # --------------------------------------------------------------------------- #
 def _normalise_item(item) -> str:
-    """Turn whatever the model returned for one asset into a clean string."""
     if isinstance(item, str):
         text = item
     elif isinstance(item, list):
-        text = "\n".join(str(part) for part in item)
+        text = "\n".join(str(p) for p in item)
     elif isinstance(item, dict):
-        text = "\n".join(str(value) for value in item.values())
+        text = "\n".join(str(v) for v in item.values())
     else:
         return ""
     text = text.replace("\\n", "\n")
@@ -184,28 +169,26 @@ def _normalise_item(item) -> str:
 
 
 def _parse_posts(raw: str) -> list[str]:
-    """Extract a JSON array of assets from raw model output (tolerates fences / chatter)."""
     raw = (raw or "").strip()
     cleaned = raw
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`").strip()
         if cleaned.lower().startswith("json"):
             cleaned = cleaned[4:].strip()
-
     candidates = [cleaned]
-    match = re.search(r"\[.*\]", cleaned, re.DOTALL)
-    if match:
-        candidates.append(match.group(0))
-
-    for candidate in candidates:
+    m = re.search(r"\[.*\]", cleaned, re.DOTALL)
+    if m:
+        candidates.append(m.group(0))
+    for cand in candidates:
         try:
-            data = json.loads(candidate)
+            data = json.loads(cand)
         except Exception:
             continue
+        if isinstance(data, dict):  # JSON mode sometimes wraps the array
+            data = next((v for v in data.values() if isinstance(v, list)), None)
         if isinstance(data, list) and data:
-            items = [_normalise_item(item) for item in data]
-            return [item for item in items if item]
-
+            items = [_normalise_item(i) for i in data]
+            return [i for i in items if i]
     single = _normalise_item(raw)
     return [single] if single else []
 
@@ -214,126 +197,100 @@ def _word_count(text: str) -> int:
     return len(re.findall(r"\b[\w'’%£$-]+\b", text))
 
 
-def _is_concise(post: str, format_type: str) -> bool:
-    """True when the asset respects the short-form limits."""
+def _cut(text: str, n: int) -> str:
+    words = text.split()
+    return text if len(words) <= n else " ".join(words[:n]).rstrip(",;:- ")
+
+
+def _coerce(post, format_type: str):
+    """Trim an asset to the short-form limits instead of discarding it. None only if unusable."""
     if not isinstance(post, str) or not post.strip():
-        return False
+        return None
+    lines = [l.strip() for l in post.replace("\r", "").split("\n") if l.strip()]
 
     if format_type == "Carousel":
-        slides = [line.strip() for line in post.splitlines() if line.strip()]
-        if not 3 <= len(slides) <= CAROUSEL_SLIDES + 1:
-            return False
-        total = 0
-        for slide in slides:
-            body = re.sub(r"^\s*slide\s*\d+\s*[:.\-]\s*", "", slide, flags=re.IGNORECASE)
-            words = _word_count(body)
-            if words > CAROUSEL_SLIDE_MAX_WORDS + 4:  # small tolerance
-                return False
-            total += words
-        return total <= CAROUSEL_MAX_WORDS + 15
+        bodies = [re.sub(r"^\s*slide\s*\d+\s*[:.\-]\s*", "", l, flags=re.IGNORECASE) for l in lines]
+        bodies = [b for b in bodies if b][:CAROUSEL_SLIDES]
+        if len(bodies) < 3:
+            return None
+        return "\n".join(f"Slide {i}: {_cut(b, CAROUSEL_SLIDE_MAX_WORDS)}" for i, b in enumerate(bodies, 1))
 
-    first_line = next((line for line in post.splitlines() if line.strip()), "")
-    if _word_count(first_line) > POST_HEADLINE_MAX_WORDS + 4:
-        return False
-    return _word_count(post) <= POST_MAX_WORDS + 10
+    if len(lines) < 3:
+        return None
+    head = _cut(lines[0], POST_HEADLINE_MAX_WORDS)
+    tail, mid = lines[-2:], lines[1:-2]
+    budget = POST_MAX_WORDS - _word_count(head) - sum(_word_count(t) for t in tail)
+    keep: list[str] = []
+    for m in mid:
+        wc = _word_count(m)
+        if wc > budget:
+            break
+        keep.append(m)
+        budget -= wc
+    if mid and not keep:
+        keep = [_cut(mid[0], 8)]
+    return "\n\n".join(p for p in (head, "\n".join(keep), tail[0], tail[1]) if p)
 
 
 def _dedupe_posts(posts: list[str]) -> list[str]:
-    """Remove repeated text while preserving the first unique instance."""
-    unique_posts: list[str] = []
-    seen: set[str] = set()
-    for post in posts:
-        if not isinstance(post, str):
+    out, seen = [], set()
+    for p in posts:
+        if not isinstance(p, str):
             continue
-        key = " ".join(post.lower().split())
-        if key in seen:
-            continue
-        seen.add(key)
-        unique_posts.append(post)
-    return unique_posts
+        key = " ".join(p.lower().split())
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
 
 
 def _max_tokens_for(format_type: str, num_posts: int) -> int:
-    """Keep the output budget close to the amount of copy actually required."""
-    per_item = 115 if format_type == "Carousel" else 75
-    return min(1200, max(256, num_posts * per_item + 100))
+    """Enough room for the JSON (the old 75/post budget could truncate output)."""
+    per_item = 170 if format_type == "Carousel" else 120
+    return min(2000, max(384, num_posts * per_item + 150))
 
 
 # --------------------------------------------------------------------------- #
-# Fallback copy (short, compliant, used only if the AI can't produce enough)
+# Fallback copy (instant, local)
 # --------------------------------------------------------------------------- #
 def _cta_line(guideline: str) -> str:
     g = (guideline or "").strip()
-    if g and _word_count(g) <= 14:
-        return g
-    return "Speak to a regulated adviser."
+    return g if g and _word_count(g) <= 14 else "Speak to a regulated adviser."
 
 
 def _format_fallback_post(category: str, guideline: str, index: int) -> str:
     cat = category.lower()
-    hooks = [
-        f"Thinking about {cat}? Start with the right questions.",
-        f"{category} choices are personal. Your plan should be too.",
-        f"Before your next {cat} decision, pause.",
-        f"Not sure where to begin with {cat}?",
-        f"{category}: clarity first, decisions second.",
-    ]
-    bodies = [
-        "Know your goals.\nUnderstand the trade-offs.\nPlan with your timeline in mind.",
-        "Compare your options.\nCheck the risks as well as the benefits.\nChoose what fits your life.",
-        "Ask what it does.\nAsk what it costs.\nAsk what could go wrong.",
-        "Your goals matter.\nYour timescale matters.\nSo does your comfort with risk.",
-        "Look at the bigger picture.\nTake time to weigh it up.\nGet the facts before you act.",
-    ]
-    risks = [
-        "Values can go down as well as up.",
-        "Outcomes aren't guaranteed and depend on your circumstances.",
-        "Tax treatment depends on individual circumstances.",
-    ]
-    return (
-        f"{hooks[index % len(hooks)]}\n\n"
-        f"{bodies[index % len(bodies)]}\n\n"
-        f"{risks[index % len(risks)]}\n\n"
-        f"{_cta_line(guideline)}"
-    )
+    hooks = [f"Thinking about {cat}? Start with the right questions.", f"{category} choices are personal. Your plan should be too.",
+             f"Before your next {cat} decision, pause.", f"Not sure where to begin with {cat}?",
+             f"{category}: clarity first, decisions second."]
+    bodies = ["Know your goals.\nUnderstand the trade-offs.\nPlan with your timeline in mind.",
+              "Compare your options.\nCheck the risks as well as the benefits.\nChoose what fits your life.",
+              "Ask what it does.\nAsk what it costs.\nAsk what could go wrong.",
+              "Your goals matter.\nYour timescale matters.\nSo does your comfort with risk.",
+              "Look at the bigger picture.\nTake time to weigh it up.\nGet the facts before you act."]
+    risks = ["Values can go down as well as up.", "Outcomes aren't guaranteed and depend on your circumstances.",
+             "Tax treatment depends on individual circumstances."]
+    return (f"{hooks[index % len(hooks)]}\n\n{bodies[index % len(bodies)]}\n\n"
+            f"{risks[index % len(risks)]}\n\n{_cta_line(guideline)}")
 
 
 def _format_fallback_carousel(category: str, guideline: str, index: int) -> str:
     cat = category.lower()
-    hooks = [
-        f"Thinking about {cat}?",
-        f"{category}: are you asking the right questions?",
-        f"3 things to check before your {cat} decision",
-        f"Common {cat} mistakes to avoid",
-        f"{category} made simpler",
-    ]
-    mids = [
-        ("Know what you want your money to do.", "Compare options before you commit."),
-        ("Look at your timescale, not just today.", "Weigh benefits against the risks."),
-        ("Ask what it costs and how it works.", "Ask what could go wrong."),
-        ("Rushing a decision can limit your choices.", "Take time to understand the trade-offs."),
-        ("Start with your goals.", "Build the plan around your life."),
-    ]
-    risk = "Values can go down as well as up. Nothing is guaranteed."
-    slide_2, slide_3 = mids[index % len(mids)]
-    return "\n".join([
-        f"Slide 1: {hooks[index % len(hooks)]}",
-        f"Slide 2: {slide_2}",
-        f"Slide 3: {slide_3}",
-        f"Slide 4: {risk}",
-        f"Slide 5: {_cta_line(guideline)}",
-    ])
+    hooks = [f"Thinking about {cat}?", f"{category}: are you asking the right questions?",
+             f"3 things to check before your {cat} decision", f"Common {cat} mistakes to avoid", f"{category} made simpler"]
+    mids = [("Know what you want your money to do.", "Compare options before you commit."),
+            ("Look at your timescale, not just today.", "Weigh benefits against the risks."),
+            ("Ask what it costs and how it works.", "Ask what could go wrong."),
+            ("Rushing a decision can limit your choices.", "Take time to understand the trade-offs."),
+            ("Start with your goals.", "Build the plan around your life.")]
+    s2, s3 = mids[index % len(mids)]
+    return "\n".join([f"Slide 1: {hooks[index % len(hooks)]}", f"Slide 2: {s2}", f"Slide 3: {s3}",
+                      "Slide 4: Values can go down as well as up. Nothing is guaranteed.", f"Slide 5: {_cta_line(guideline)}"])
 
 
-def _fallback_posts(format_type: str, category: str, guideline: str, num_posts: int, start_index: int = 0) -> list:
-    """Return compliant, short default copy."""
-    posts = []
-    for index in range(start_index, start_index + max(num_posts, 1)):
-        if format_type == "Carousel":
-            posts.append(_format_fallback_carousel(category, guideline, index))
-        else:
-            posts.append(_format_fallback_post(category, guideline, index))
-    return posts
+def _fallback_posts(format_type, category, guideline, num_posts, start_index=0) -> list:
+    fn = _format_fallback_carousel if format_type == "Carousel" else _format_fallback_post
+    return [fn(category, guideline, i) for i in range(start_index, start_index + max(num_posts, 1))]
 
 
 # --------------------------------------------------------------------------- #
@@ -341,267 +298,204 @@ def _fallback_posts(format_type: str, category: str, guideline: str, num_posts: 
 # --------------------------------------------------------------------------- #
 @lru_cache(maxsize=1)
 def _resolve_ollama_model() -> str:
-    """Return the installed Ollama model or raise a clear, actionable error."""
     try:
-        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=15)
-        response.raise_for_status()
-        payload = response.json()
-    except Exception as exc:  # pragma: no cover - depends on local Ollama daemon
-        raise RuntimeError(
-            "Ollama is not reachable. Start it with 'ollama serve' and make sure "
-            f"the server is running at {OLLAMA_BASE_URL}."
-        ) from exc
-
-    models = payload.get("models", [])
-    available = []
-    for model in models:
-        if isinstance(model, dict):
-            name = model.get("name")
-            if name:
-                available.append(name)
-
+        r = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=10)
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("Ollama is not reachable. Start it with 'ollama serve' and make sure "
+                           f"the server is running at {OLLAMA_BASE_URL}.") from exc
+    available = [m["name"] for m in payload.get("models", []) if isinstance(m, dict) and m.get("name")]
     if not available:
-        raise RuntimeError(
-            "No Ollama models were found locally. Pull one first, for example: "
-            f"'ollama pull {OLLAMA_MODEL}'"
-        )
-
-    normalized = OLLAMA_MODEL.lower()
+        raise RuntimeError(f"No Ollama models were found locally. Pull one first: 'ollama pull {OLLAMA_MODEL}'")
+    wanted = OLLAMA_MODEL.lower()
     for name in available:
-        if name.lower() == normalized or name.lower().startswith(f"{normalized}:"):
+        if name.lower() == wanted or name.lower().startswith(f"{wanted}:"):
             return name
-
-    raise RuntimeError(
-        f"The configured Ollama model '{OLLAMA_MODEL}' is not installed. "
-        f"Installed models: {', '.join(available)}. Pull it with 'ollama pull {OLLAMA_MODEL}'"
-    )
+    raise RuntimeError(f"The configured Ollama model '{OLLAMA_MODEL}' is not installed. "
+                       f"Installed models: {', '.join(available)}. Pull it with 'ollama pull {OLLAMA_MODEL}'")
 
 
 def _call_ollama(prompt: str, max_tokens: int) -> str:
-    model_name = _resolve_ollama_model()
-    response = requests.post(
+    r = requests.post(
         f"{OLLAMA_BASE_URL}/api/generate",
-        json={
-            "model": model_name,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.75, "top_p": 0.9, "num_predict": max_tokens},
-        },
-        timeout=90,
+        json={"model": _resolve_ollama_model(), "prompt": prompt, "stream": False, "keep_alive": "30m",
+              "options": {"temperature": 0.75, "top_p": 0.9, "num_predict": max_tokens, "num_ctx": 2048}},
+        timeout=OLLAMA_TIMEOUT_S,
     )
-    response.raise_for_status()
-    payload = response.json()
-    return payload.get("response", "")
+    r.raise_for_status()
+    return r.json().get("response", "")
 
 
-def _generate_with_ollama(format_type: str, category: str, guideline: str, num_posts: int) -> list:
-    reference_text = get_sections_reference_text()
-    if not reference_text:
-        reference_text = (
-            "(No cached FCA reference text yet — run 'Run compliance check now' on the "
-            "Compliance Monitor tab at least once before generating copy.)"
-        )
-
-    category_note = CATEGORY_NOTES.get(category, "")
-    prompt = _build_system_prompt(
-        format_type=format_type,
-        category=category,
-        category_note=category_note,
-        reference_text=reference_text,
-        guideline=guideline,
-        num_posts=num_posts,
-    )
-    variation_token = uuid.uuid4().hex[:8]
-    raw = _call_ollama(
-        prompt + "\n\n" + _build_user_prompt(
-            format_type,
-            category,
-            num_posts,
-            variation_token=variation_token,
-            angle_seed=int(variation_token[:2], 16),
-        ),
-        max_tokens=_max_tokens_for(format_type, num_posts),
-    )
-    posts = _dedupe_posts(_parse_posts(raw))
-    return posts[: max(num_posts, 1)]
+def _generate_with_ollama(format_type, category, guideline, num_posts) -> list:
+    system = _build_system_prompt(format_type, category, CATEGORY_NOTES.get(category, ""), _reference_text(), guideline, num_posts)
+    token = uuid.uuid4().hex[:8]
+    raw = _call_ollama(system + "\n\n" + _build_user_prompt(format_type, category, num_posts, token, int(token[:2], 16)),
+                       _max_tokens_for(format_type, num_posts))
+    return _dedupe_posts(_parse_posts(raw))[: max(num_posts, 1)]
 
 
 # --------------------------------------------------------------------------- #
 # Gemini
 # --------------------------------------------------------------------------- #
 def _gemini_model_candidates() -> list[str]:
-    """Return configured model candidates without an extra API discovery request."""
-    candidates: list[str] = []
-    seen: set[str] = set()
-    configured = [GEMINI_MODEL] + list(GEMINI_FALLBACK_MODELS)
-    for model_name in configured:
-        model_name = (model_name or "").strip()
-        if not model_name or model_name in seen:
-            continue
-        seen.add(model_name)
-        candidates.append(model_name)
-
-    return candidates
+    seen, out = set(), []
+    for name in [GEMINI_MODEL] + list(GEMINI_FALLBACK_MODELS):
+        name = (name or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
 
 
 def _is_transient_gemini_error(exc: Exception) -> bool:
-    message = str(exc).lower()
-    if "api_key_invalid" in message or "api key not valid" in message:
+    """Only overload / rate-limit / timeout / missing-model errors justify another model."""
+    msg = str(exc).lower()
+    if "api_key_invalid" in msg or "api key not valid" in msg:
         return False
-    return any(
-        token in message
-        for token in [
-            "503",
-            "503 unavailable",
-            "500",
-            "internal error",
-            "unavailable",
-            "rate limit",
-            "429",
-            "404",
-            "400",
-            "invalid_argument",
-            "response modalities",
-            "not found",
-            "no longer available",
-            "resource exhausted",
-            "overloaded",
-            "temporarily unavailable",
-        ]
-    )
+    return any(t in msg for t in ("503", "500", "429", "404", "unavailable", "overloaded", "rate limit", "timed out",
+                                  "timeout", "deadline", "resource exhausted", "internal error", "not found",
+                                  "no longer available"))
 
 
-def _generate_with_gemini(format_type: str, category: str, guideline: str, num_posts: int) -> list:
-    if genai is None or types is None:
-        raise RuntimeError("Google GenAI SDK is not installed.")
+def _gemini_text(client, model: str, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+    def cfg(think_off: bool, tokens: int):
+        kw = dict(system_instruction=system_prompt, max_output_tokens=tokens, temperature=0.9, top_p=0.9,
+                  response_mime_type="application/json")
+        if think_off:
+            kw["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        return types.GenerateContentConfig(**kw)
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    reference_text = get_sections_reference_text()
-    if not reference_text:
-        reference_text = (
-            "(No cached FCA reference text yet — run 'Run compliance check now' on the "
-            "Compliance Monitor tab at least once before generating copy.)"
-        )
+    try:
+        resp = client.models.generate_content(model=model, contents=user_prompt, config=cfg(True, max_tokens))
+    except Exception as exc:
+        # Older SDK / model that can't turn thinking off -> plain call with headroom for its reasoning tokens.
+        if not isinstance(exc, (AttributeError, TypeError)) and "thinking" not in str(exc).lower():
+            raise
+        resp = client.models.generate_content(model=model, contents=user_prompt, config=cfg(False, max_tokens + 1024))
 
-    category_note = CATEGORY_NOTES.get(category, "")
-    system_prompt = _build_system_prompt(
-        format_type=format_type,
-        category=category,
-        category_note=category_note,
-        reference_text=reference_text,
-        guideline=guideline,
-        num_posts=num_posts,
-    )
+    raw = getattr(resp, "text", "") or ""
+    if not raw:
+        parts = []
+        for cand in getattr(resp, "candidates", None) or []:
+            for part in getattr(getattr(cand, "content", None), "parts", None) or []:
+                if getattr(part, "text", ""):
+                    parts.append(part.text)
+        raw = "".join(parts)
+    return raw
 
-    last_error: Exception | None = None
-    for model_name in _gemini_model_candidates():
+
+def _gemini_call(system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+    client, last = _gemini_client(), None
+    for model in _gemini_model_candidates()[:MAX_MODEL_TRIES]:
         try:
-            variation_token = uuid.uuid4().hex[:8]
-            response = client.models.generate_content(
-                model=model_name,
-                contents=_build_user_prompt(
-                    format_type,
-                    category,
-                    num_posts,
-                    variation_token=variation_token,
-                    angle_seed=int(variation_token[:2], 16),
-                ),
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    max_output_tokens=_max_tokens_for(format_type, num_posts),
-                    temperature=0.9,
-                    top_p=0.9,
-                    response_mime_type="application/json",
-                ),
-            )
-
-            raw = getattr(response, "text", "")
-            if not raw and hasattr(response, "candidates"):
-                parts = []
-                for candidate in response.candidates or []:
-                    content = getattr(candidate, "content", None)
-                    for part in getattr(content, "parts", []) or []:
-                        text = getattr(part, "text", "")
-                        if text:
-                            parts.append(text)
-                raw = "".join(parts)
-
-            posts = _dedupe_posts(_parse_posts(raw or ""))
-            return posts[: max(num_posts, 1)]
-        except Exception as exc:  # pragma: no cover - exercised by fallback tests
-            last_error = exc
+            return _gemini_text(client, model, system_prompt, user_prompt, max_tokens)
+        except Exception as exc:
+            last = exc
             if not _is_transient_gemini_error(exc):
                 raise
+    raise last or RuntimeError("Gemini generation failed with no usable model candidates.")
 
-    if last_error is not None:
-        raise last_error
 
-    raise RuntimeError("Gemini generation failed with no usable model candidates.")
+def _split(n: int, workers: int) -> list[int]:
+    k = max(1, min(n, workers))
+    base, extra = divmod(n, k)
+    return [base + (1 if i < extra else 0) for i in range(k)]
+
+
+def _generate_with_gemini(format_type, category, guideline, num_posts) -> list:
+    if genai is None or types is None:
+        raise RuntimeError("Google GenAI SDK is not installed.")
+    num_posts = max(num_posts, 1)
+    system = _build_system_prompt(format_type, category, CATEGORY_NOTES.get(category, ""), _reference_text(), guideline, num_posts)
+    sizes = _split(num_posts, MAX_PARALLEL) if PARALLEL and num_posts > 1 else [num_posts]
+    base_angle = int(uuid.uuid4().hex[:2], 16)
+    offsets = [sum(sizes[:i]) for i in range(len(sizes))]
+
+    def job(size: int, offset: int) -> str:
+        token = uuid.uuid4().hex[:8]
+        sys_prompt = system.replace(f"exactly {num_posts} strings", f"exactly {size} strings")
+        return _gemini_call(sys_prompt, _build_user_prompt(format_type, category, size, token, base_angle + offset),
+                            _max_tokens_for(format_type, size))
+
+    if len(sizes) == 1:
+        return _dedupe_posts(_parse_posts(job(sizes[0], 0)))[:num_posts]
+
+    posts, errors = [], []
+    with ThreadPoolExecutor(max_workers=len(sizes)) as pool:
+        futures = [pool.submit(job, s, o) for s, o in zip(sizes, offsets)]
+        for fut in futures:
+            try:
+                posts += _parse_posts(fut.result())
+            except Exception as exc:
+                errors.append(exc)
+    if not posts and errors:
+        raise errors[0]
+    return _dedupe_posts(posts)[:num_posts]
 
 
 # --------------------------------------------------------------------------- #
-# Retry + enforcement
+# Collect: one AI round -> trim -> dedupe -> instant local top-up
 # --------------------------------------------------------------------------- #
-def _retry_unique_posts(generator_func, format_type: str, category: str, guideline: str, num_posts: int, max_attempts: int = 1):
-    """
-    Make one AI request, keep valid unique assets, and fill any gaps locally.
-    This avoids multiple slow model round-trips for a single user action.
-    """
+def _retry_unique_posts(generator_func, format_type, category, guideline, num_posts):
     target = max(num_posts, 1)
     collected: list[str] = []
     seen: set[str] = set()
 
-    for _ in range(max_attempts):
-        needed = target - len(collected)
-        candidate_posts = generator_func(format_type, category, guideline, needed)
-        for post in candidate_posts:
-            if not isinstance(post, str):
-                continue
-            key = " ".join(post.lower().split())
-            if key in seen:
-                continue
-            if not _is_concise(post, format_type):
-                continue
+    for post in generator_func(format_type, category, guideline, target):
+        fixed = _coerce(post, format_type)
+        if not fixed:
+            continue
+        key = " ".join(fixed.lower().split())
+        if key not in seen:
             seen.add(key)
-            collected.append(post)
-        if len(collected) >= target:
-            return collected[:target]
+            collected.append(fixed)
 
     if len(collected) < target:
-        needed = target - len(collected)
-        for filler in _fallback_posts(format_type, category, guideline, needed + 5, start_index=uuid.uuid4().int % 5):
+        for filler in _fallback_posts(format_type, category, guideline, target + 5, start_index=uuid.uuid4().int % 5):
             key = " ".join(filler.lower().split())
-            if key in seen:
-                continue
-            seen.add(key)
-            collected.append(filler)
-            if len(collected) >= target:
-                break
-
+            if key not in seen:
+                seen.add(key)
+                collected.append(filler)
+                if len(collected) >= target:
+                    break
     return collected[:target]
 
 
 def generate_posts(format_type: str, category: str, guideline: str, num_posts: int) -> list:
-    target_count = max(num_posts, 1)
+    target = max(num_posts, 1)
 
     if AI_PROVIDER == "gemini":
         if not GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY is missing. Add it in Streamlit Cloud > Settings > Secrets.")
         try:
-            return _retry_unique_posts(_generate_with_gemini, format_type, category, guideline, target_count)
+            return _retry_unique_posts(_generate_with_gemini, format_type, category, guideline, target)
         except Exception as exc:
             raise RuntimeError(f"Gemini generation failed: {exc}") from exc
 
     if AI_PROVIDER == "ollama":
         try:
-            return _retry_unique_posts(_generate_with_ollama, format_type, category, guideline, target_count)
+            return _retry_unique_posts(_generate_with_ollama, format_type, category, guideline, target)
         except Exception as exc:
             raise RuntimeError(f"Ollama generation failed: {exc}") from exc
 
     if GEMINI_API_KEY:
         try:
-            return _retry_unique_posts(_generate_with_gemini, format_type, category, guideline, target_count)
+            return _retry_unique_posts(_generate_with_gemini, format_type, category, guideline, target)
         except Exception as exc:
             raise RuntimeError(f"Gemini generation failed: {exc}") from exc
 
     raise RuntimeError("No AI provider is configured. Add GEMINI_API_KEY or set AI_PROVIDER to ollama.")
+
+
+def warm_up() -> None:
+    """Call once at app start (e.g. inside st.cache_resource) so the first user request is fast."""
+    try:
+        _reference_text()
+        if AI_PROVIDER == "ollama":
+            requests.post(f"{OLLAMA_BASE_URL}/api/generate", timeout=OLLAMA_TIMEOUT_S,
+                          json={"model": _resolve_ollama_model(), "prompt": "", "keep_alive": "30m", "stream": False})
+        elif genai is not None and GEMINI_API_KEY:
+            _gemini_client()
+    except Exception:
+        pass

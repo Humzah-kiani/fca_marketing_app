@@ -36,9 +36,9 @@ def test_build_system_prompt_requires_category_specific_output():
     )
 
     assert "Investment" in prompt
-    assert "distinct" in prompt.lower()
-    assert "same hook" in prompt.lower()
-    assert "category-specific" in prompt.lower()
+    assert "category: \"investment\"" in prompt.lower()
+    assert "specific to investment" in prompt.lower()
+    assert "different hook" in prompt.lower()
 
 
 def test_build_user_prompt_uses_fresh_angle_every_time():
@@ -80,15 +80,18 @@ def test_generate_with_gemini_tries_fallback_model_on_404_or_503(monkeypatch):
                 return type("Response", (), {"text": '["Fallback post"]'})()
 
     monkeypatch.setattr(generator, "GEMINI_MODEL", "gemini-3.8-flash")
-    monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["gemini-3.8-flash-lite"])
-    monkeypatch.setattr(generator, "genai", type("FakeGenAI", (), {"Client": FakeClient}))
-    monkeypatch.setattr(generator, "types", type("FakeTypes", (), {"GenerateContentConfig": lambda **kwargs: kwargs}))
-    monkeypatch.setattr(generator, "get_sections_reference_text", lambda: "Reference text")
+    monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["fallback-test-model"])
+    monkeypatch.setattr(generator, "_gemini_client", lambda: FakeClient("test-key"))
+    monkeypatch.setattr(generator, "types", type("FakeTypes", (), {
+        "GenerateContentConfig": lambda **kwargs: kwargs,
+        "ThinkingConfig": lambda **kwargs: kwargs,
+    }))
+    monkeypatch.setattr(generator, "_reference_text", lambda: "Reference text")
 
     result = _generate_with_gemini("Post", "Retirement", "Campaign", 1)
 
     assert result == ["Fallback post"]
-    assert calls == ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+    assert calls == ["gemini-3.8-flash", "fallback-test-model"]
 
 
 def test_generate_with_gemini_tries_fallback_model_on_internal_error(monkeypatch):
@@ -109,15 +112,18 @@ def test_generate_with_gemini_tries_fallback_model_on_internal_error(monkeypatch
                 return type("Response", (), {"text": '["Fallback post"]'})()
 
     monkeypatch.setattr(generator, "GEMINI_MODEL", "gemini-3.8-flash")
-    monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["gemini-3.8-flash-lite"])
-    monkeypatch.setattr(generator, "genai", type("FakeGenAI", (), {"Client": FakeClient}))
-    monkeypatch.setattr(generator, "types", type("FakeTypes", (), {"GenerateContentConfig": lambda **kwargs: kwargs}))
-    monkeypatch.setattr(generator, "get_sections_reference_text", lambda: "Reference text")
+    monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["fallback-test-model"])
+    monkeypatch.setattr(generator, "_gemini_client", lambda: FakeClient("test-key"))
+    monkeypatch.setattr(generator, "types", type("FakeTypes", (), {
+        "GenerateContentConfig": lambda **kwargs: kwargs,
+        "ThinkingConfig": lambda **kwargs: kwargs,
+    }))
+    monkeypatch.setattr(generator, "_reference_text", lambda: "Reference text")
 
     result = _generate_with_gemini("Post", "Retirement", "Campaign", 1)
 
     assert result == ["Fallback post"]
-    assert calls == ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+    assert calls == ["gemini-3.8-flash", "fallback-test-model"]
 
 
 def test_gemini_model_candidates_use_configured_models_without_discovery(monkeypatch):
@@ -132,13 +138,18 @@ def test_generation_uses_one_request_and_fills_missing_posts_locally():
 
     def generate(_format_type, _category, _guideline, count):
         requested_counts.append(count)
-        return ["A concise first post."]
+        return [
+            "Retirement choices start with your goals.\n\n"
+            "Compare your options.\nWeigh the risks and benefits.\n\n"
+            "Values can fall as well as rise.\n\n"
+            "Speak to a regulated adviser."
+        ]
 
     posts = _retry_unique_posts(generate, "Post", "Retirement", "", 3)
 
     assert requested_counts == [3]
     assert len(posts) == 3
-    assert posts[0] == "A concise first post."
+    assert posts[0].startswith("Retirement choices start with your goals.")
     assert len(set(posts)) == 3
 
 
@@ -154,11 +165,13 @@ def test_normalise_gemini_model_preserves_explicit_model_selection():
     assert _normalise_gemini_model("gemini-3.6-flash") == "gemini-3.8-flash"
     assert _normalise_gemini_model("gemini-1.5-flash") == "gemini-3.8-flash"
     assert _normalise_gemini_model("gemini-2.0-flash") == "gemini-3.8-flash"
+    assert _normalise_gemini_model("gemini-3.8-flash-lite") == "gemini-3.8-flash"
 
 
 def test_gemini_fallbacks_exclude_retired_models():
     assert "gemini-1.5-flash" not in generator.GEMINI_FALLBACK_MODELS
     assert "gemini-2.0-flash" not in generator.GEMINI_FALLBACK_MODELS
+    assert "gemini-3.8-flash-lite" not in generator.GEMINI_FALLBACK_MODELS
 
 
 def test_build_system_prompt_uses_premium_social_style():
@@ -173,7 +186,6 @@ def test_build_system_prompt_uses_premium_social_style():
 
     assert "premium" in prompt.lower()
     assert "strong hook" in prompt.lower()
-    assert "modern financial adviser social brand" in prompt.lower()
 
 
 def test_post_generation_module_reexports_post_studio_api():
