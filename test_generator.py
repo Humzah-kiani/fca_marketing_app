@@ -126,6 +126,25 @@ def test_generate_with_gemini_tries_fallback_model_on_internal_error(monkeypatch
     assert calls == ["gemini-3.8-flash", "fallback-test-model"]
 
 
+def test_gemini_deadline_error_is_transient():
+    assert _is_transient_gemini_error(RuntimeError("504 DEADLINE_EXCEEDED"))
+
+
+def test_gemini_transient_failure_returns_local_posts_and_records_status(monkeypatch):
+    monkeypatch.setattr(generator, "AI_PROVIDER", "gemini")
+    monkeypatch.setattr(generator, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(generator, "_generate_with_gemini", lambda *args: (_ for _ in ()).throw(
+        RuntimeError("504 DEADLINE_EXCEEDED")
+    ))
+    monkeypatch.setattr(generator, "GRACEFUL_FALLBACK", True)
+
+    posts = generator.generate_posts("Post", "Retirement", "", 1)
+
+    assert len(posts) == 1
+    assert generator.last_generation_info["used_fallback"] is True
+    assert "504" in generator.last_generation_info["error"]
+
+
 def test_gemini_model_candidates_use_configured_models_without_discovery(monkeypatch):
     monkeypatch.setattr(generator, "GEMINI_MODEL", "primary")
     monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", ["fallback", "primary"])

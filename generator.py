@@ -44,7 +44,9 @@ from fca_monitor import get_sections_reference_text
 PARALLEL = True               # split multi-post requests into parallel Gemini calls
 MAX_PARALLEL = 4
 MAX_MODEL_TRIES = 2
-GEMINI_TIMEOUT_MS = 20_000
+GEMINI_TIMEOUT_MS = 60_000    # also sent to Google as the server-side deadline - too low causes 504 DEADLINE_EXCEEDED
+GRACEFUL_FALLBACK = True      # on overload/timeout, return local copy instead of failing the whole generation
+last_generation_info = {"used_fallback": False, "error": ""}   # read this in your UI to show a warning
 OLLAMA_TIMEOUT_S = 90
 REFERENCE_CHARS = 600
 
@@ -353,7 +355,7 @@ def _is_transient_gemini_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     if "api_key_invalid" in msg or "api key not valid" in msg:
         return False
-    return any(t in msg for t in ("503", "500", "429", "404", "unavailable", "overloaded", "rate limit", "timed out",
+    return any(t in msg for t in ("503", "504", "500", "429", "404", "unavailable", "overloaded", "rate limit", "timed out",
                                   "timeout", "deadline", "resource exhausted", "internal error", "not found",
                                   "no longer available"))
 
@@ -387,13 +389,18 @@ def _gemini_text(client, model: str, system_prompt: str, user_prompt: str, max_t
 
 def _gemini_call(system_prompt: str, user_prompt: str, max_tokens: int) -> str:
     client, last = _gemini_client(), None
-    for model in _gemini_model_candidates()[:MAX_MODEL_TRIES]:
+    models = _gemini_model_candidates()[:MAX_MODEL_TRIES]
+    if len(models) == 1:
+        models = models * 2  # only one model configured -> one quick retry on the same model
+    for i, model in enumerate(models):
         try:
             return _gemini_text(client, model, system_prompt, user_prompt, max_tokens)
         except Exception as exc:
             last = exc
             if not _is_transient_gemini_error(exc):
                 raise
+            if i < len(models) - 1:
+                time.sleep(0.7)
     raise last or RuntimeError("Gemini generation failed with no usable model candidates.")
 
 
@@ -462,16 +469,25 @@ def _retry_unique_posts(generator_func, format_type, category, guideline, num_po
     return collected[:target]
 
 
+def _run_gemini(format_type, category, guideline, target):
+    last_generation_info.update(used_fallback=False, error="")
+    try:
+        return _retry_unique_posts(_generate_with_gemini, format_type, category, guideline, target)
+    except Exception as exc:
+        if GRACEFUL_FALLBACK and _is_transient_gemini_error(exc):
+            last_generation_info.update(used_fallback=True, error=str(exc))
+            return _fallback_posts(format_type, category, guideline, target, start_index=uuid.uuid4().int % 5)
+        raise RuntimeError(f"Gemini generation failed: {exc}") from exc
+
+
 def generate_posts(format_type: str, category: str, guideline: str, num_posts: int) -> list:
     target = max(num_posts, 1)
+    last_generation_info.update(used_fallback=False, error="")
 
     if AI_PROVIDER == "gemini":
         if not GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY is missing. Add it in Streamlit Cloud > Settings > Secrets.")
-        try:
-            return _retry_unique_posts(_generate_with_gemini, format_type, category, guideline, target)
-        except Exception as exc:
-            raise RuntimeError(f"Gemini generation failed: {exc}") from exc
+        return _run_gemini(format_type, category, guideline, target)
 
     if AI_PROVIDER == "ollama":
         try:
@@ -480,10 +496,7 @@ def generate_posts(format_type: str, category: str, guideline: str, num_posts: i
             raise RuntimeError(f"Ollama generation failed: {exc}") from exc
 
     if GEMINI_API_KEY:
-        try:
-            return _retry_unique_posts(_generate_with_gemini, format_type, category, guideline, target)
-        except Exception as exc:
-            raise RuntimeError(f"Gemini generation failed: {exc}") from exc
+        return _run_gemini(format_type, category, guideline, target)
 
     raise RuntimeError("No AI provider is configured. Add GEMINI_API_KEY or set AI_PROVIDER to ollama.")
 
