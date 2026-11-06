@@ -87,7 +87,7 @@ The primary workspace for generating compliance-grounded text assets.
 #### Step-by-Step Operating Instructions:
 1. **Format Selection**:
    - `Post`: Complete, standalone social media text featuring a headline hook, body copy, risk disclosures, and call-to-action.
-   - `Carousel`: A sequence of slide-ready copy blocks (Slides 1 through 5) structured for multi-image carousel formats.
+   - `Carousel`: A sequence of slide-ready copy blocks. Choose between 2 and 10 slides; the default is 5.
 2. **Category Selection**:
    Choose from 8 pre-configured financial categories:
    - **Retirement**: Pension income planning (highlights that investment/pension values can fall as well as rise; no guaranteed income promises).
@@ -98,11 +98,13 @@ The primary workspace for generating compliance-grounded text assets.
    - **Investment and Estate Planning**: Tax treatment warnings (notes individual tax dependency and rule changes).
    - **Pension**: Pension transfer and volatility disclosures; age access restrictions.
    - **Lifestyle**: Aspirational lifestyle tone disassociated from direct financial product guarantees.
-3. **Optional Guideline**:
-   - Input custom context (e.g., specific campaign name, sub-product focus, desired target platform, or firm-specific CTA).
-4. **Number of Posts**:
+3. **Post description (optional)**:
+   - For `Post` format, describe the topic, product, audience, or key points to guide the generated copy.
+4. **Optional guideline**:
+   - Add tone, campaign, platform, or other writing instructions for either format.
+5. **Number of Posts**:
    - Set the batch request size (1 to 20 posts).
-5. **Generation Execution**:
+6. **Generation Execution**:
    - Click **Generate**.
    - The app fetches cached FCA Handbook text, constructs the system prompt, calls the AI provider, and sends the raw result to the **Compliance Validator**.
    - If validation passes, the batch is saved to PostgreSQL alongside an exact cryptographic snapshot of active FCA rules, and output text is presented on screen. The first generated post, format, and category are loaded into the Design Post studio.

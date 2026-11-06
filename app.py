@@ -18,7 +18,12 @@ from fca_monitor import (
     get_sections_reference_text,
     check_for_updates,
 )
-from generator import generate_posts
+from generator import (
+    CAROUSEL_SLIDES,
+    MAX_CAROUSEL_SLIDES,
+    MIN_CAROUSEL_SLIDES,
+    generate_posts,
+)
 
 st.set_page_config(
     page_title="FCA Compliant Marketing Generator",
@@ -319,6 +324,21 @@ with tab_generate:
     st.subheader("Post details")
     format_type = st.selectbox("Format", ["Post", "Carousel"])
     category = st.selectbox("Category", CATEGORIES, key="generate_category")
+    post_description = ""
+    carousel_slide_count = CAROUSEL_SLIDES
+    if format_type == "Post":
+        post_description = st.text_area(
+            "Optional post description",
+            placeholder="Describe the topic, product, audience, or key points for this post...",
+        )
+    else:
+        carousel_slide_count = st.number_input(
+            "Slides per carousel",
+            min_value=MIN_CAROUSEL_SLIDES,
+            max_value=MAX_CAROUSEL_SLIDES,
+            value=CAROUSEL_SLIDES,
+            step=1,
+        )
     guideline = st.text_area(
         "Optional guideline",
         placeholder="e.g. tone, campaign name, specific product to mention, target platform...",
@@ -330,11 +350,17 @@ with tab_generate:
     if st.button("Generate", type="primary"):
         with st.status("Preparing generation...", expanded=False) as generation_status:
             try:
-                generation_status.update(label="Preparing FCA references...")
-                ensure_sections_seeded()
+                generation_status.update(label="Loading FCA references...")
                 snapshot = get_current_snapshot()
-                generation_status.update(label="Generating text with Gemini...")
-                posts = generate_posts(format_type, category, guideline, int(num_posts))
+                generation_status.update(label=f"Generating text with {active_model}...")
+                posts = generate_posts(
+                    format_type,
+                    category,
+                    guideline,
+                    int(num_posts),
+                    post_description=post_description,
+                    carousel_slide_count=int(carousel_slide_count),
+                )
                 generation_status.update(label="Checking generated text for compliance...")
                 validation_results = validate_posts(posts, format_type, category)
                 generation_status.update(
@@ -377,14 +403,17 @@ with tab_generate:
                 ]
                 batch = execute(
                     """INSERT INTO generation_batches
-                           (advisor_id, format_type, category, guideline, num_posts,
+                           (advisor_id, format_type, category, guideline,
+                            post_description, carousel_slide_count, num_posts,
                             fca_sections_snapshot, used_clauses)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
                     (
                         None,
                         format_type,
                         category,
                         guideline,
+                        post_description or None,
+                        int(carousel_slide_count) if format_type == "Carousel" else None,
                         len(posts),
                         json.dumps(snapshot),
                         json.dumps(used_clauses),
@@ -430,7 +459,8 @@ with tab_history:
     st.subheader("Generation history")
     rows = fetch_all(
         """SELECT gb.id AS batch_id, gb.created_at, gb.format_type, gb.category, gb.guideline,
-                  gb.num_posts, gb.used_clauses, gp.id AS post_id, gp.post_index, gp.post_text, gp.status
+                  gb.post_description, gb.carousel_slide_count, gb.num_posts, gb.used_clauses,
+                  gp.id AS post_id, gp.post_index, gp.post_text, gp.status
            FROM generation_batches gb
            JOIN generated_posts gp ON gp.batch_id = gb.id
            ORDER BY gb.created_at DESC, gp.post_index ASC"""
@@ -451,6 +481,10 @@ with tab_history:
                 unsafe_allow_html=True,
             )
             st.write(f"Guideline: {r['guideline'] or '(none)'}")
+            if r["post_description"]:
+                st.write(f"Post description: {r['post_description']}")
+            if r["format_type"] == "Carousel" and r["carousel_slide_count"]:
+                st.write(f"Slides: {r['carousel_slide_count']}")
             used_clauses = _coerce_json_list(r["used_clauses"])
             if used_clauses:
                 st.write("FCA reference material used:")

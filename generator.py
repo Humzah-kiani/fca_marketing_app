@@ -44,6 +44,8 @@ REFERENCE_CHARS = 600
 POST_MAX_WORDS = 65
 POST_HEADLINE_MAX_WORDS = 10
 CAROUSEL_SLIDES = 5
+MIN_CAROUSEL_SLIDES = 2
+MAX_CAROUSEL_SLIDES = 10
 CAROUSEL_SLIDE_MAX_WORDS = 18
 CAROUSEL_MAX_WORDS = 90
 
@@ -70,6 +72,7 @@ Compliance: never promise or imply guaranteed returns/outcomes; balance benefits
 Variety: every item must use a different hook, angle and structure.
 
 Reference (background only, never quote): {reference_text}
+Post topic or description: {post_description}
 Adviser guideline: {guideline}
 
 Output: ONLY a JSON array of exactly {num_posts} strings. No markdown or commentary. Use "\\n" for line breaks inside strings."""
@@ -81,9 +84,25 @@ POST_RULES = f"""- Each post MAX {POST_MAX_WORDS} words, each part on its own li
   4) One short CTA line (max 12 words)
 - Example (do NOT copy): "Retiring soon? Your pension has a plan too.\\n\\nKnow your options.\\nCompare your income choices.\\n\\nPension values can fall as well as rise.\\n\\nSpeak to a regulated adviser." """
 
-CAROUSEL_RULES = f"""- EXACTLY {CAROUSEL_SLIDES} slides, MAX {CAROUSEL_SLIDE_MAX_WORDS} words each, one per line as "Slide N: <text>".
-- 1 = bold hook; 2-3 = one practical idea each; 4 = short risk reminder; 5 = soft CTA to speak with a regulated adviser.
-- Example (do NOT copy): "Slide 1: Thinking about your pension?\\nSlide 2: Know what you want your money to do.\\nSlide 3: Compare options before you commit.\\nSlide 4: Values can fall as well as rise.\\nSlide 5: Speak to a regulated adviser." """
+def _carousel_rules(slide_count: int) -> str:
+    if slide_count == 2:
+        structure = "1 = bold hook and useful context; 2 = short risk reminder and soft CTA."
+    elif slide_count == 3:
+        structure = "1 = bold hook; 2 = one useful idea plus a short risk reminder; 3 = soft CTA."
+    else:
+        structure = (
+            f"1 = bold hook; 2-{slide_count - 2} = practical ideas; "
+            f"{slide_count - 1} = short risk reminder; {slide_count} = soft CTA "
+            "to speak with a regulated adviser."
+        )
+    return (
+        f"- EXACTLY {slide_count} slides, MAX {CAROUSEL_SLIDE_MAX_WORDS} words each, "
+        'one per line as "Slide N: <text>".\n'
+        f"- {structure}"
+    )
+
+
+CAROUSEL_RULES = _carousel_rules(CAROUSEL_SLIDES)
 
 
 # --------------------------------------------------------------------------- #
@@ -103,13 +122,27 @@ def _reference_text() -> str:
 # --------------------------------------------------------------------------- #
 # Prompts
 # --------------------------------------------------------------------------- #
-def _build_system_prompt(format_type, category, category_note, reference_text, guideline, num_posts) -> str:
+def _build_system_prompt(
+    format_type,
+    category,
+    category_note,
+    reference_text,
+    guideline,
+    num_posts,
+    post_description="",
+    carousel_slide_count=CAROUSEL_SLIDES,
+) -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(
         format_type=format_type,
         category=category,
         category_note=category_note or "(none)",
-        format_rules=CAROUSEL_RULES if format_type == "Carousel" else POST_RULES,
+        format_rules=(
+            _carousel_rules(carousel_slide_count)
+            if format_type == "Carousel"
+            else POST_RULES
+        ),
         reference_text=(reference_text or "(none)")[:REFERENCE_CHARS],
+        post_description=(post_description or "(none)")[:300],
         guideline=(guideline or "(none)")[:300],
         num_posts=num_posts,
     )
@@ -125,11 +158,18 @@ _ANGLES = [
 ]
 
 
-def _build_user_prompt(format_type, category, num_posts, variation_token=None, angle_seed=None) -> str:
+def _build_user_prompt(
+    format_type,
+    category,
+    num_posts,
+    variation_token=None,
+    angle_seed=None,
+    carousel_slide_count=CAROUSEL_SLIDES,
+) -> str:
     variation_token = variation_token or uuid.uuid4().hex[:8]
     angle_seed = angle_seed if angle_seed is not None else int(variation_token[:2], 16)
     angles = "; ".join(f"{i + 1}) {_ANGLES[(angle_seed + i) % len(_ANGLES)]}" for i in range(min(num_posts, len(_ANGLES))))
-    limit = (f"exactly {CAROUSEL_SLIDES} slides, max {CAROUSEL_SLIDE_MAX_WORDS} words each"
+    limit = (f"exactly {carousel_slide_count} slides, max {CAROUSEL_SLIDE_MAX_WORDS} words each"
              if format_type == "Carousel" else f"max {POST_MAX_WORDS} words each")
     return (f"Create {num_posts} distinct SHORT {format_type.lower()} assets for '{category}' ({limit}). "
             f"Seed {variation_token}. Angles in order: {angles}. Punchy, scannable, no repeated hooks.")
@@ -187,7 +227,7 @@ def _cut(text: str, n: int) -> str:
     return text if len(words) <= n else " ".join(words[:n]).rstrip(",;:- ")
 
 
-def _coerce(post, format_type: str):
+def _coerce(post, format_type: str, carousel_slide_count=CAROUSEL_SLIDES):
     """Trim an asset to the short-form limits instead of discarding it. None only if unusable."""
     if not isinstance(post, str) or not post.strip():
         return None
@@ -195,8 +235,8 @@ def _coerce(post, format_type: str):
 
     if format_type == "Carousel":
         bodies = [re.sub(r"^\s*slide\s*\d+\s*[:.\-]\s*", "", l, flags=re.IGNORECASE) for l in lines]
-        bodies = [b for b in bodies if b][:CAROUSEL_SLIDES]
-        if len(bodies) < 3:
+        bodies = [b for b in bodies if b][:carousel_slide_count]
+        if len(bodies) < carousel_slide_count:
             return None
         return "\n".join(f"Slide {i}: {_cut(b, CAROUSEL_SLIDE_MAX_WORDS)}" for i, b in enumerate(bodies, 1))
 
@@ -229,10 +269,18 @@ def _dedupe_posts(posts: list[str]) -> list[str]:
     return out
 
 
-def _max_tokens_for(format_type: str, num_posts: int) -> int:
+def _max_tokens_for(
+    format_type: str,
+    num_posts: int,
+    carousel_slide_count=CAROUSEL_SLIDES,
+) -> int:
     """Enough room for the JSON (the old 75/post budget could truncate output)."""
-    per_item = 170 if format_type == "Carousel" else 120
+    per_item = 50 + carousel_slide_count * 28 if format_type == "Carousel" else 120
     return min(2000, max(384, num_posts * per_item + 150))
+
+
+def _normalise_carousel_slide_count(slide_count) -> int:
+    return min(MAX_CAROUSEL_SLIDES, max(MIN_CAROUSEL_SLIDES, int(slide_count)))
 
 
 # --------------------------------------------------------------------------- #
@@ -259,7 +307,12 @@ def _format_fallback_post(category: str, guideline: str, index: int) -> str:
             f"{risks[index % len(risks)]}\n\n{_cta_line(guideline)}")
 
 
-def _format_fallback_carousel(category: str, guideline: str, index: int) -> str:
+def _format_fallback_carousel(
+    category: str,
+    guideline: str,
+    index: int,
+    carousel_slide_count=CAROUSEL_SLIDES,
+) -> str:
     cat = category.lower()
     hooks = [f"Thinking about {cat}?", f"{category}: are you asking the right questions?",
              f"3 things to check before your {cat} decision", f"Common {cat} mistakes to avoid", f"{category} made simpler"]
@@ -269,13 +322,40 @@ def _format_fallback_carousel(category: str, guideline: str, index: int) -> str:
             ("Rushing a decision can limit your choices.", "Take time to understand the trade-offs."),
             ("Start with your goals.", "Build the plan around your life.")]
     s2, s3 = mids[index % len(mids)]
-    return "\n".join([f"Slide 1: {hooks[index % len(hooks)]}", f"Slide 2: {s2}", f"Slide 3: {s3}",
-                      "Slide 4: Values can go down as well as up. Nothing is guaranteed.", f"Slide 5: {_cta_line(guideline)}"])
+    slides = [f"Slide 1: {hooks[index % len(hooks)]}"]
+    for slide_number in range(2, carousel_slide_count):
+        if slide_number == carousel_slide_count - 1:
+            slides.append(f"Slide {slide_number}: Values can go down as well as up. Nothing is guaranteed.")
+        elif slide_number == 2:
+            slides.append(f"Slide {slide_number}: {s2}")
+        else:
+            slides.append(f"Slide {slide_number}: {s3}")
+    final_text = (
+        f"{_cta_line(guideline)}"
+        if carousel_slide_count > 2
+        else f"Values can go down as well as up. {_cta_line(guideline)}"
+    )
+    slides.append(f"Slide {carousel_slide_count}: {final_text}")
+    return "\n".join(slides)
 
 
-def _fallback_posts(format_type, category, guideline, num_posts, start_index=0) -> list:
-    fn = _format_fallback_carousel if format_type == "Carousel" else _format_fallback_post
-    return [fn(category, guideline, i) for i in range(start_index, start_index + max(num_posts, 1))]
+def _fallback_posts(
+    format_type,
+    category,
+    guideline,
+    num_posts,
+    start_index=0,
+    carousel_slide_count=CAROUSEL_SLIDES,
+) -> list:
+    if format_type == "Carousel":
+        return [
+            _format_fallback_carousel(category, guideline, i, carousel_slide_count)
+            for i in range(start_index, start_index + max(num_posts, 1))
+        ]
+    return [
+        _format_fallback_post(category, guideline, i)
+        for i in range(start_index, start_index + max(num_posts, 1))
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -312,11 +392,38 @@ def _call_ollama(prompt: str, max_tokens: int) -> str:
     return r.json().get("response", "")
 
 
-def _generate_with_ollama(format_type, category, guideline, num_posts) -> list:
-    system = _build_system_prompt(format_type, category, CATEGORY_NOTES.get(category, ""), _reference_text(), guideline, num_posts)
+def _generate_with_ollama(
+    format_type,
+    category,
+    guideline,
+    num_posts,
+    post_description="",
+    carousel_slide_count=CAROUSEL_SLIDES,
+) -> list:
+    system = _build_system_prompt(
+        format_type,
+        category,
+        CATEGORY_NOTES.get(category, ""),
+        _reference_text(),
+        guideline,
+        num_posts,
+        post_description,
+        carousel_slide_count,
+    )
     token = uuid.uuid4().hex[:8]
-    raw = _call_ollama(system + "\n\n" + _build_user_prompt(format_type, category, num_posts, token, int(token[:2], 16)),
-                       _max_tokens_for(format_type, num_posts))
+    raw = _call_ollama(
+        system
+        + "\n\n"
+        + _build_user_prompt(
+            format_type,
+            category,
+            num_posts,
+            token,
+            int(token[:2], 16),
+            carousel_slide_count,
+        ),
+        _max_tokens_for(format_type, num_posts, carousel_slide_count),
+    )
     return _dedupe_posts(_parse_posts(raw))[: max(num_posts, 1)]
 
 
@@ -365,9 +472,26 @@ def _split(n: int, workers: int) -> list[int]:
     return [base + (1 if i < extra else 0) for i in range(k)]
 
 
-def _generate_with_gemini(format_type, category, guideline, num_posts) -> list:
+def _generate_with_gemini(
+    format_type,
+    category,
+    guideline,
+    num_posts,
+    post_description="",
+    carousel_slide_count=CAROUSEL_SLIDES,
+) -> list:
     num_posts = max(num_posts, 1)
-    system = _build_system_prompt(format_type, category, CATEGORY_NOTES.get(category, ""), _reference_text(), guideline, num_posts)
+    carousel_slide_count = _normalise_carousel_slide_count(carousel_slide_count)
+    system = _build_system_prompt(
+        format_type,
+        category,
+        CATEGORY_NOTES.get(category, ""),
+        _reference_text(),
+        guideline,
+        num_posts,
+        post_description,
+        carousel_slide_count,
+    )
     sizes = (
         _split(num_posts, MAX_PARALLEL)
         if PARALLEL and num_posts > MAX_PARALLEL
@@ -381,8 +505,15 @@ def _generate_with_gemini(format_type, category, guideline, num_posts) -> list:
         sys_prompt = system.replace(f"exactly {num_posts} strings", f"exactly {size} strings")
         raw = _gemini_call(
             sys_prompt,
-            _build_user_prompt(format_type, category, size, token, base_angle + offset),
-            _max_tokens_for(format_type, size),
+            _build_user_prompt(
+                format_type,
+                category,
+                size,
+                token,
+                base_angle + offset,
+                carousel_slide_count,
+            ),
+            _max_tokens_for(format_type, size, carousel_slide_count),
         )
         posts = _parse_posts(raw)
         if len(posts) != size:
@@ -415,14 +546,32 @@ def _generate_with_gemini(format_type, category, guideline, num_posts) -> list:
 # Collect generated output and optionally top up local-provider results.
 # --------------------------------------------------------------------------- #
 def _retry_unique_posts(
-    generator_func, format_type, category, guideline, num_posts, allow_local_top_up=True
+    generator_func,
+    format_type,
+    category,
+    guideline,
+    num_posts,
+    allow_local_top_up=True,
+    post_description="",
+    carousel_slide_count=CAROUSEL_SLIDES,
 ):
     target = max(num_posts, 1)
     collected: list[str] = []
     seen: set[str] = set()
 
-    for post in generator_func(format_type, category, guideline, target):
-        fixed = _coerce(post, format_type)
+    if not post_description and carousel_slide_count == CAROUSEL_SLIDES:
+        generated_posts = generator_func(format_type, category, guideline, target)
+    else:
+        generated_posts = generator_func(
+            format_type,
+            category,
+            guideline,
+            target,
+            post_description,
+            carousel_slide_count,
+        )
+    for post in generated_posts:
+        fixed = _coerce(post, format_type, carousel_slide_count)
         if not fixed:
             continue
         key = " ".join(fixed.lower().split())
@@ -431,7 +580,14 @@ def _retry_unique_posts(
             collected.append(fixed)
 
     if len(collected) < target and allow_local_top_up:
-        for filler in _fallback_posts(format_type, category, guideline, target + 5, start_index=uuid.uuid4().int % 5):
+        for filler in _fallback_posts(
+            format_type,
+            category,
+            guideline,
+            target + 5,
+            start_index=uuid.uuid4().int % 5,
+            carousel_slide_count=carousel_slide_count,
+        ):
             key = " ".join(filler.lower().split())
             if key not in seen:
                 seen.add(key)
@@ -443,7 +599,14 @@ def _retry_unique_posts(
     return collected[:target]
 
 
-def _run_gemini(format_type, category, guideline, target):
+def _run_gemini(
+    format_type,
+    category,
+    guideline,
+    target,
+    post_description="",
+    carousel_slide_count=CAROUSEL_SLIDES,
+):
     try:
         return _retry_unique_posts(
             _generate_with_gemini,
@@ -452,27 +615,59 @@ def _run_gemini(format_type, category, guideline, target):
             guideline,
             target,
             allow_local_top_up=False,
+            post_description=post_description,
+            carousel_slide_count=carousel_slide_count,
         )
     except Exception as exc:
         raise RuntimeError(f"Gemini generation failed: {exc}") from exc
 
 
-def generate_posts(format_type: str, category: str, guideline: str, num_posts: int) -> list:
+def generate_posts(
+    format_type: str,
+    category: str,
+    guideline: str,
+    num_posts: int,
+    post_description="",
+    carousel_slide_count=CAROUSEL_SLIDES,
+) -> list:
     target = max(num_posts, 1)
+    carousel_slide_count = _normalise_carousel_slide_count(carousel_slide_count)
 
     if AI_PROVIDER == "gemini":
         if not GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY is missing. Add it in Streamlit Cloud > Settings > Secrets.")
-        return _run_gemini(format_type, category, guideline, target)
+        return _run_gemini(
+            format_type,
+            category,
+            guideline,
+            target,
+            post_description,
+            carousel_slide_count,
+        )
 
     if AI_PROVIDER == "ollama":
         try:
-            return _retry_unique_posts(_generate_with_ollama, format_type, category, guideline, target)
+            return _retry_unique_posts(
+                _generate_with_ollama,
+                format_type,
+                category,
+                guideline,
+                target,
+                post_description=post_description,
+                carousel_slide_count=carousel_slide_count,
+            )
         except Exception as exc:
             raise RuntimeError(f"Ollama generation failed: {exc}") from exc
 
     if GEMINI_API_KEY:
-        return _run_gemini(format_type, category, guideline, target)
+        return _run_gemini(
+            format_type,
+            category,
+            guideline,
+            target,
+            post_description,
+            carousel_slide_count,
+        )
 
     raise RuntimeError("No AI provider is configured. Add GEMINI_API_KEY or set AI_PROVIDER to ollama.")
 

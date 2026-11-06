@@ -10,6 +10,7 @@ import psycopg2.extras
 from config import DATABASE_URL
 
 _SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
+DB_CONNECT_TIMEOUT_SECONDS = 5
 
 
 @contextmanager
@@ -19,7 +20,10 @@ def get_conn():
             "DATABASE_URL is missing or points to localhost. Add a hosted PostgreSQL "
             "connection string under Streamlit Cloud > Manage app > Settings > Secrets."
         )
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(
+        DATABASE_URL,
+        connect_timeout=DB_CONNECT_TIMEOUT_SECONDS,
+    )
     try:
         yield conn
         conn.commit()
@@ -39,6 +43,12 @@ def init_db():
 
             cur.execute(
                 "ALTER TABLE generation_batches ADD COLUMN IF NOT EXISTS used_clauses JSONB"
+            )
+            cur.execute(
+                "ALTER TABLE generation_batches ADD COLUMN IF NOT EXISTS post_description TEXT"
+            )
+            cur.execute(
+                "ALTER TABLE generation_batches ADD COLUMN IF NOT EXISTS carousel_slide_count INTEGER"
             )
 
 

@@ -51,6 +51,59 @@ def test_build_user_prompt_uses_fresh_angle_every_time():
     assert prompt_1 != prompt_2
 
 
+def test_carousel_prompt_uses_requested_slide_count():
+    system_prompt = _build_system_prompt(
+        "Carousel",
+        "Investment",
+        "Capital is at risk.",
+        "Reference",
+        "",
+        1,
+        carousel_slide_count=7,
+    )
+    user_prompt = _build_user_prompt(
+        "Carousel",
+        "Investment",
+        1,
+        variation_token="abc123",
+        angle_seed=1,
+        carousel_slide_count=7,
+    )
+
+    assert "EXACTLY 7 slides" in system_prompt
+    assert "exactly 7 slides" in user_prompt
+    assert "6 = short risk reminder" in system_prompt
+    assert "7 = soft CTA" in system_prompt
+
+
+def test_post_description_is_in_generation_prompt():
+    prompt = _build_system_prompt(
+        "Post",
+        "Retirement",
+        "",
+        "Reference",
+        "Use a warm tone.",
+        1,
+        post_description="Explain pension drawdown options to new retirees.",
+    )
+
+    assert "Post topic or description: Explain pension drawdown options to new retirees." in prompt
+    assert "Adviser guideline: Use a warm tone." in prompt
+
+
+def test_carousel_coercion_requires_requested_number_of_slides():
+    carousel = "\n".join(f"Slide {number}: Information for slide {number}." for number in range(1, 5))
+
+    assert generator._coerce(carousel, "Carousel", carousel_slide_count=4) == carousel
+    assert generator._coerce(carousel, "Carousel", carousel_slide_count=5) is None
+
+
+def test_carousel_token_budget_scales_with_slide_count():
+    assert generator._max_tokens_for("Carousel", 1, carousel_slide_count=8) > (
+        generator._max_tokens_for("Carousel", 1, carousel_slide_count=4)
+    )
+
+
 def test_dedupe_posts_removes_duplicates():
     posts = [
         "Investment can be a long-term option.",
@@ -120,6 +173,45 @@ def test_generate_with_gemini_uses_one_request_for_default_post_count(monkeypatc
     assert result == ["First post", "Second post", "Third post"]
     assert len(calls) == 1
     assert calls[0][2] == generator._max_tokens_for("Post", 3)
+
+
+def test_generate_posts_passes_post_description_and_carousel_slide_count(monkeypatch):
+    calls = {}
+
+    def fake_generate(format_type, category, guideline, num_posts, post_description, slide_count):
+        calls.update(
+            format_type=format_type,
+            category=category,
+            guideline=guideline,
+            num_posts=num_posts,
+            post_description=post_description,
+            slide_count=slide_count,
+        )
+        return ["\n".join(f"Slide {i}: Advice for slide {i}." for i in range(1, 9))]
+
+    monkeypatch.setattr(generator, "AI_PROVIDER", "gemini")
+    monkeypatch.setattr(generator, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(generator, "_generate_with_gemini", fake_generate)
+
+    result = generator.generate_posts(
+        "Carousel",
+        "Retirement",
+        "Use a reassuring tone.",
+        1,
+        post_description="Explain pension choices.",
+        carousel_slide_count=8,
+    )
+
+    assert len(result) == 1
+    assert result[0].count("\n") == 7
+    assert calls == {
+        "format_type": "Carousel",
+        "category": "Retirement",
+        "guideline": "Use a reassuring tone.",
+        "num_posts": 1,
+        "post_description": "Explain pension choices.",
+        "slide_count": 8,
+    }
 
 
 def test_gemini_deadline_error_is_transient():

@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS generation_batches (
     format_type            TEXT NOT NULL,      -- 'Post' or 'Carousel'
     category               TEXT NOT NULL,      -- Retirement / Investment / ...
     guideline              TEXT,               -- optional free-text guideline
+    post_description       TEXT,
+    carousel_slide_count   INTEGER,
     num_posts              INTEGER NOT NULL,
     -- snapshot of {section_key: content_hash} for every FCA section that
     -- was used to ground the generation prompt. Used later to detect which

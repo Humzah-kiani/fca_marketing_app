@@ -10,7 +10,7 @@ except ImportError:  # pragma: no cover - optional cloud dependency
 
 from config import GEMINI_API_KEY
 
-GEMINI_TIMEOUT_MS = 60_000
+GEMINI_TIMEOUT_MS = 30_000
 GEMINI_API_VERSION = "v1beta"
 
 
