@@ -33,3 +33,25 @@ def test_generate_interaction_uses_interactions_api_and_requested_model(monkeypa
         "thinking_level": "minimal",
     }
     assert calls["response_mime_type"] == "application/json"
+
+
+def test_client_uses_v1beta_for_json_response_mode(monkeypatch):
+    calls = {}
+
+    class FakeGenAI:
+        @staticmethod
+        def Client(**kwargs):
+            calls.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(gemini_api, "genai", FakeGenAI)
+    monkeypatch.setattr(gemini_api, "GEMINI_API_KEY", "test-key")
+    gemini_api._client.cache_clear()
+    try:
+        gemini_api._client()
+    finally:
+        gemini_api._client.cache_clear()
+
+    assert calls["api_key"] == "test-key"
+    assert calls["http_options"].api_version == "v1beta"
+    assert calls["http_options"].timeout == gemini_api.GEMINI_TIMEOUT_MS

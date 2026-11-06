@@ -19,7 +19,10 @@ def _client():
         raise RuntimeError("Google GenAI SDK is not installed.")
     return genai.Client(
         api_key=GEMINI_API_KEY,
-        http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
+        http_options=types.HttpOptions(
+            api_version="v1beta",
+            timeout=GEMINI_TIMEOUT_MS,
+        ),
     )
 
 
