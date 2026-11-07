@@ -18,11 +18,13 @@ The application is structured into decoupled modules covering UI presentation, A
 ```mermaid
 flowchart TD
     subgraph UI ["Streamlit Frontend (app.py)"]
-        T1["Tab 1: Generate Copy"]
-        T2["Tab 2: Design Post (Post Studio)"]
-        T3["Tab 3: Generation History"]
-        T4["Tab 4: Compliance Monitor"]
-        T5["Tab 5: Flagged Posts"]
+        T1["Generate"]
+        T2["History"]
+        T3["Post Tracker"]
+        T4["Compliance Monitor"]
+        T5["Flagged Posts"]
+        T6["Design Post (Post Studio)"]
+        T7["Publish"]
     end
 
     subgraph Core ["Core Engine Logic"]
@@ -114,6 +116,17 @@ The primary workspace for generating compliance-grounded text assets.
    - Click **Generate**.
    - The app fetches cached FCA Handbook text, constructs the system prompt, calls the AI provider, and sends the raw result to the **Compliance Validator**.
    - If validation passes, the batch is saved to PostgreSQL alongside an exact cryptographic snapshot of active FCA rules, and output text is presented on screen. The first generated post, format, and category are loaded into the Design Post studio.
+
+---
+
+### Post Tracker
+
+The **Post Tracker** lists each saved generated item with a serial number, batch ID,
+category, format, creation time, and status. Select a record to view its copy or
+edit it. Carousel records show every slide and allow slide-by-slide edits. Use
+**Open in Design Post** to load the selected item into the graphic editor; its
+carousel slides can then be selected from the studio slide strip. Saving edited
+copy marks the record for compliance review.
 
 ---
 

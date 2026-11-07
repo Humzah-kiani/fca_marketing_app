@@ -7,6 +7,7 @@ from PIL import Image
 
 from post_studio_ai import post_studio_ai_ui
 from direct_social_publisher import render_direct_social_publisher
+from post_tracker import render_post_tracker
 
 from config import AI_PROVIDER, GEMINI_MODEL, OLLAMA_MODEL
 from db import init_db, fetch_all, execute
@@ -315,8 +316,8 @@ CATEGORIES = [
     "Lifestyle",
 ]
 
-tab_generate, tab_history, tab_monitor, tab_flagged, tab_design, tab_publish = st.tabs(
-    ["Generate", "History", "Compliance Monitor", "Flagged Posts", "Design Post", "Publish"]
+tab_generate, tab_history, tab_tracker, tab_monitor, tab_flagged, tab_design, tab_publish = st.tabs(
+    ["Generate", "History", "Post Tracker", "Compliance Monitor", "Flagged Posts", "Design Post", "Publish"]
 )
 
 # ---------------------------------------------------------------- Generate
@@ -449,6 +450,10 @@ with tab_generate:
 # -------------------------------------------------------------- Design Post
 with tab_design:
     post_studio_ai_ui()
+
+# -------------------------------------------------------------- Post Tracker
+with tab_tracker:
+    render_post_tracker(st)
 
 # -------------------------------------------------------------- Publish
 with tab_publish:
