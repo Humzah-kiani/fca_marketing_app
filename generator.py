@@ -42,10 +42,10 @@ from gemini_api import POSTS_SCHEMA, generate_interaction
 # --------------------------------------------------------------------------- #
 MAX_MODEL_TRIES = 2
 
-PARALLEL = True               # split multi-post requests into parallel Gemini calls
+PARALLEL = True
 MAX_PARALLEL = 5
 HEDGE_AFTER_S = 10            # primary slower than this -> race the fallback model
-MAX_GENERATION_SECONDS = 75
+MAX_GENERATION_SECONDS = 25
 OLLAMA_TIMEOUT_S = 90
 REFERENCE_CHARS = 600
 
@@ -456,17 +456,29 @@ def _gemini_call(
     try:
         launch()
         while pending:
-            hedge_timeout = HEDGE_AFTER_S
+            wait_timeout = None
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("Gemini generation exceeded its time budget.")
-                hedge_timeout = min(hedge_timeout, remaining)
-            done, _ = wait(pending, timeout=hedge_timeout if started < len(models) else None,
-                           return_when=FIRST_COMPLETED)
+                wait_timeout = (
+                    min(HEDGE_AFTER_S, remaining)
+                    if started < len(models)
+                    else remaining
+                )
+            elif started < len(models):
+                wait_timeout = HEDGE_AFTER_S
+
+            done, _ = wait(
+                pending,
+                timeout=wait_timeout,
+                return_when=FIRST_COMPLETED,
+            )
             if not done:
-                launch()
-                continue
+                if started < len(models):
+                    launch()
+                    continue
+                raise TimeoutError("Gemini generation exceeded its time budget.")
             for fut in done:
                 pending.discard(fut)
                 try:
@@ -490,12 +502,16 @@ def _split(n: int, workers: int) -> list[int]:
 
 def _generate_with_gemini(format_type, category, guideline, num_posts, post_description="",
                           carousel_slide_count=CAROUSEL_SLIDES, deadline=None) -> list:
-    """Output length drives latency, so any multi-post request is split into parallel calls."""
+    """Keep normal-sized batches in one request; parallelize only larger batches."""
     num_posts = max(num_posts, 1)
     count = _normalise_carousel_slide_count(carousel_slide_count)
     system = _build_system_prompt(format_type, category, CATEGORY_NOTES.get(category, ""), _reference_text(),
                                   guideline, num_posts, post_description, count)
-    sizes = _split(num_posts, MAX_PARALLEL) if PARALLEL and num_posts > 1 else [num_posts]
+    sizes = (
+        _split(num_posts, MAX_PARALLEL)
+        if PARALLEL and num_posts > MAX_PARALLEL
+        else [num_posts]
+    )
     base_angle = int(uuid.uuid4().hex[:2], 16)
     offsets = [sum(sizes[:i]) for i in range(len(sizes))]
 

@@ -39,11 +39,12 @@ AI_PROVIDER = _setting("AI_PROVIDER", "gemini").lower()
 GEMINI_API_KEY = _setting("GEMINI_API_KEY")
 
 def _normalise_gemini_model(model_name: str) -> str:
-    """Keep the app aligned with current, supported Gemini text models."""
+    """Prefer the low-latency model for short marketing-copy generation."""
     raw = (model_name or "").strip()
     if raw.startswith("models/"):
         raw = raw.replace("models/", "", 1)
     if not raw or raw in (
+        "gemini-3.8-flash",
         "gemini-3.6-flash",
         "gemini-2.5-flash",
         "gemini-2.5-flash-preview-tts",
@@ -51,15 +52,20 @@ def _normalise_gemini_model(model_name: str) -> str:
         "gemini-1.5-flash",
         "gemini-3.8-flash-lite",
     ):
-        return "gemini-3.8-flash"
+        return "gemini-3.5-flash-lite"
     return raw
 
 
 # Active text generation model.
-GEMINI_MODEL = _normalise_gemini_model(_setting("GEMINI_MODEL", "gemini-3.8-flash"))
+GEMINI_MODEL = _normalise_gemini_model(
+    _setting("GEMINI_MODEL", "gemini-3.5-flash-lite")
+)
 GEMINI_FALLBACK_MODELS: list[str] = [
     _normalise_gemini_model(model)
-    for model in _setting("GEMINI_FALLBACK_MODELS").split(",")
+    for model in _setting(
+        "GEMINI_FALLBACK_MODELS",
+        "gemini-3.5-flash-lite",
+    ).split(",")
     if model.strip()
 ]
 

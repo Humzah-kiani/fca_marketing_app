@@ -67,11 +67,12 @@ flowchart TD
 Gemini generation and independent compliance review use the Google GenAI SDK's
 Interactions API via `gemini_api.py`; they do not call the legacy
 `generateContent` endpoint. Set `GEMINI_API_KEY` in the deployment secrets and
-use `GEMINI_MODEL=gemini-3.8-flash` (the default). Gemini API errors are shown
+use `GEMINI_MODEL=gemini-3.5-flash-lite` (the low-latency default). Configured
+`gemini-3.8-flash` values are routed to Flash-Lite for short-copy generation.
+Gemini API errors are shown
 as generation failures rather than being replaced with local template copy.
-Generation requests use a 75-second time budget, with a 90-second client
-timeout, and may be split across parallel calls for multiple posts. Optional
-comma-separated fallback models can
+Generation uses one request for up to five posts and has a 25-second overall
+time budget. Optional comma-separated fallback models can
 be set with `GEMINI_FALLBACK_MODELS`; only configured models are tried.
 Compliance validation uses its own JSON response shape and fails closed if the
 independent AI review cannot complete. Ollama can be selected explicitly with
@@ -355,8 +356,8 @@ Create a `.env` file or configure Streamlit Cloud Secrets:
 | `DATABASE_URL` | *None* | Hosted PostgreSQL connection string (`postgresql://user:pass@host:5432/db`) |
 | `AI_PROVIDER` | `gemini` | Choice of AI engine (`gemini` or `ollama`) |
 | `GEMINI_API_KEY` | *None* | Google Gemini API key |
-| `GEMINI_MODEL` | `gemini-3.8-flash` | Active Google Gemini model identifier |
-| `GEMINI_FALLBACK_MODELS` | *None* | Optional comma-separated Gemini models used for fallback/hedged requests |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Active Google Gemini model identifier |
+| `GEMINI_FALLBACK_MODELS` | `gemini-3.5-flash-lite` | Comma-separated Gemini fallback models used for hedged requests |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Endpoint URL for local Ollama instance |
 | `OLLAMA_MODEL` | `qwen2.5:3b-instruct` | Installed Ollama model identifier |
 | `FCA_CHECK_INTERVAL_HOURS` | `24` | Informational check interval for cron scripts |

@@ -1,4 +1,5 @@
 import importlib
+import time
 
 import pytest
 
@@ -158,22 +159,42 @@ def test_generate_with_gemini_tries_fallback_model_on_internal_error(monkeypatch
     assert calls == ["gemini-3.8-flash", "fallback-test-model"]
 
 
-def test_generate_with_gemini_splits_default_post_count_into_parallel_requests(monkeypatch):
+def test_gemini_call_respects_deadline_without_configured_fallback(monkeypatch):
+    monkeypatch.setattr(generator, "GEMINI_MODEL", "primary")
+    monkeypatch.setattr(generator, "GEMINI_FALLBACK_MODELS", [])
+    monkeypatch.setattr(
+        generator,
+        "_gemini_text",
+        lambda *args: time.sleep(0.25),
+    )
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="time budget"):
+        generator._gemini_call(
+            "system",
+            "user",
+            100,
+            deadline=started + 0.05,
+        )
+
+    assert time.monotonic() - started < 0.2
+
+
+def test_generate_with_gemini_uses_one_request_for_default_post_count(monkeypatch):
     calls = []
 
     def fake_gemini_call(system_prompt, user_prompt, max_tokens):
         calls.append((system_prompt, user_prompt, max_tokens))
-        return f'["Post {len(calls)}"]'
+        return '["First post", "Second post", "Third post"]'
 
     monkeypatch.setattr(generator, "_gemini_call", fake_gemini_call)
     monkeypatch.setattr(generator, "_reference_text", lambda: "Reference text")
 
     result = _generate_with_gemini("Post", "Retirement", "", 3)
 
-    assert len(result) == 3
-    assert len(set(result)) == 3
-    assert len(calls) == 3
-    assert all(call[2] == generator._max_tokens_for("Post", 1) for call in calls)
+    assert result == ["First post", "Second post", "Third post"]
+    assert len(calls) == 1
+    assert calls[0][2] == generator._max_tokens_for("Post", 3)
 
 
 def test_generate_posts_passes_post_description_and_carousel_slide_count(monkeypatch):
@@ -320,13 +341,13 @@ def test_invalid_gemini_api_key_is_not_transient():
     assert not _is_transient_gemini_error(error)
 
 
-def test_normalise_gemini_model_preserves_explicit_model_selection():
-    assert _normalise_gemini_model("gemini-3.8-flash") == "gemini-3.8-flash"
-    assert _normalise_gemini_model("models/gemini-3.8-flash") == "gemini-3.8-flash"
-    assert _normalise_gemini_model("gemini-3.6-flash") == "gemini-3.8-flash"
-    assert _normalise_gemini_model("gemini-1.5-flash") == "gemini-3.8-flash"
-    assert _normalise_gemini_model("gemini-2.0-flash") == "gemini-3.8-flash"
-    assert _normalise_gemini_model("gemini-3.8-flash-lite") == "gemini-3.8-flash"
+def test_normalise_gemini_model_prefers_low_latency_supported_model():
+    assert _normalise_gemini_model("gemini-3.8-flash") == "gemini-3.5-flash-lite"
+    assert _normalise_gemini_model("models/gemini-3.8-flash") == "gemini-3.5-flash-lite"
+    assert _normalise_gemini_model("gemini-3.6-flash") == "gemini-3.5-flash-lite"
+    assert _normalise_gemini_model("gemini-1.5-flash") == "gemini-3.5-flash-lite"
+    assert _normalise_gemini_model("gemini-2.0-flash") == "gemini-3.5-flash-lite"
+    assert _normalise_gemini_model("gemini-3.8-flash-lite") == "gemini-3.5-flash-lite"
 
 
 def test_gemini_fallbacks_exclude_retired_models():
