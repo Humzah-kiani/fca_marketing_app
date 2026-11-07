@@ -57,7 +57,11 @@ def _normalise_gemini_model(model_name: str) -> str:
 
 # Active text generation model.
 GEMINI_MODEL = _normalise_gemini_model(_setting("GEMINI_MODEL", "gemini-3.8-flash"))
-GEMINI_FALLBACK_MODELS: list[str] = []
+GEMINI_FALLBACK_MODELS: list[str] = [
+    _normalise_gemini_model(model)
+    for model in _setting("GEMINI_FALLBACK_MODELS").split(",")
+    if model.strip()
+]
 
 # --- Local Ollama API ------------------------------------------------------
 # Use a lightweight local LLM for more stable downloads and lower RAM usage.

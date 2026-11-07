@@ -158,27 +158,37 @@ def test_generate_with_gemini_tries_fallback_model_on_internal_error(monkeypatch
     assert calls == ["gemini-3.8-flash", "fallback-test-model"]
 
 
-def test_generate_with_gemini_uses_one_request_for_default_post_count(monkeypatch):
+def test_generate_with_gemini_splits_default_post_count_into_parallel_requests(monkeypatch):
     calls = []
 
     def fake_gemini_call(system_prompt, user_prompt, max_tokens):
         calls.append((system_prompt, user_prompt, max_tokens))
-        return '["First post", "Second post", "Third post"]'
+        return f'["Post {len(calls)}"]'
 
     monkeypatch.setattr(generator, "_gemini_call", fake_gemini_call)
     monkeypatch.setattr(generator, "_reference_text", lambda: "Reference text")
 
     result = _generate_with_gemini("Post", "Retirement", "", 3)
 
-    assert result == ["First post", "Second post", "Third post"]
-    assert len(calls) == 1
-    assert calls[0][2] == generator._max_tokens_for("Post", 3)
+    assert len(result) == 3
+    assert len(set(result)) == 3
+    assert len(calls) == 3
+    assert all(call[2] == generator._max_tokens_for("Post", 1) for call in calls)
 
 
 def test_generate_posts_passes_post_description_and_carousel_slide_count(monkeypatch):
     calls = {}
+    deadlines = []
 
-    def fake_generate(format_type, category, guideline, num_posts, post_description, slide_count):
+    def fake_generate(
+        format_type,
+        category,
+        guideline,
+        num_posts,
+        post_description,
+        slide_count,
+        deadline,
+    ):
         calls.update(
             format_type=format_type,
             category=category,
@@ -187,6 +197,7 @@ def test_generate_posts_passes_post_description_and_carousel_slide_count(monkeyp
             post_description=post_description,
             slide_count=slide_count,
         )
+        deadlines.append(deadline)
         return ["\n".join(f"Slide {i}: Advice for slide {i}." for i in range(1, 9))]
 
     monkeypatch.setattr(generator, "AI_PROVIDER", "gemini")
@@ -212,6 +223,8 @@ def test_generate_posts_passes_post_description_and_carousel_slide_count(monkeyp
         "post_description": "Explain pension choices.",
         "slide_count": 8,
     }
+    assert len(deadlines) == 1
+    assert isinstance(deadlines[0], float)
 
 
 def test_gemini_deadline_error_is_transient():

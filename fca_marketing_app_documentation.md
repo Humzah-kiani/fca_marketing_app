@@ -69,8 +69,12 @@ Interactions API via `gemini_api.py`; they do not call the legacy
 `generateContent` endpoint. Set `GEMINI_API_KEY` in the deployment secrets and
 use `GEMINI_MODEL=gemini-3.8-flash` (the default). Gemini API errors are shown
 as generation failures rather than being replaced with local template copy.
-Compliance validation also fails closed if the independent AI review cannot
-complete. Ollama can be selected explicitly with `AI_PROVIDER=ollama`.
+Generation requests use a shared 18-second time budget and may be split across
+parallel calls for multiple posts. Optional comma-separated fallback models can
+be set with `GEMINI_FALLBACK_MODELS`; only configured models are tried.
+Compliance validation uses its own JSON response shape and fails closed if the
+independent AI review cannot complete. Ollama can be selected explicitly with
+`AI_PROVIDER=ollama`.
 
 ---
 
@@ -351,6 +355,7 @@ Create a `.env` file or configure Streamlit Cloud Secrets:
 | `AI_PROVIDER` | `gemini` | Choice of AI engine (`gemini` or `ollama`) |
 | `GEMINI_API_KEY` | *None* | Google Gemini API key |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Active Google Gemini model identifier |
+| `GEMINI_FALLBACK_MODELS` | *None* | Optional comma-separated Gemini models used for fallback/hedged requests |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Endpoint URL for local Ollama instance |
 | `OLLAMA_MODEL` | `qwen2.5:3b-instruct` | Installed Ollama model identifier |
 | `FCA_CHECK_INTERVAL_HOURS` | `24` | Informational check interval for cron scripts |
