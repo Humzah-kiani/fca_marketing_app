@@ -17,6 +17,7 @@ Speed design
   * FCA reference text cached for 10 minutes; Ollama model lookup cached.
 """
 import json
+import math
 import re
 import time
 import uuid
@@ -44,7 +45,7 @@ MAX_MODEL_TRIES = 2
 PARALLEL = True               # split multi-post requests into parallel Gemini calls
 MAX_PARALLEL = 5
 HEDGE_AFTER_S = 10            # primary slower than this -> race the fallback model
-MAX_GENERATION_SECONDS = 18
+MAX_GENERATION_SECONDS = 75
 OLLAMA_TIMEOUT_S = 90
 REFERENCE_CHARS = 600
 
@@ -414,7 +415,7 @@ def _gemini_text(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Gemini generation exceeded its time budget.")
-            timeout_ms = max(1, int(remaining) * 1000)
+            timeout_ms = max(1, math.ceil(remaining * 1000))
         return generate_interaction(
             model,
             system_prompt,

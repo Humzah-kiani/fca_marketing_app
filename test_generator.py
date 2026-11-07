@@ -231,6 +231,35 @@ def test_gemini_deadline_error_is_transient():
     assert _is_transient_gemini_error(RuntimeError("504 DEADLINE_EXCEEDED"))
 
 
+def test_gemini_client_timeout_is_transient():
+    assert _is_transient_gemini_error(
+        RuntimeError("Request timed out. This is a client-side timeout.")
+    )
+
+
+def test_gemini_request_timeout_tracks_remaining_generation_budget(monkeypatch):
+    observed = {}
+    timestamps = iter([1.0, 1.25, 1.5])
+
+    def fake_generate_interaction(*args, **kwargs):
+        observed.update(kwargs)
+        return '{"posts":["Generated post"]}'
+
+    monkeypatch.setattr(generator, "generate_interaction", fake_generate_interaction)
+    monkeypatch.setattr(generator.time, "monotonic", lambda: next(timestamps))
+
+    result = generator._gemini_text(
+        "primary",
+        "system",
+        "user",
+        100,
+        deadline=20.0,
+    )
+
+    assert result == '{"posts":["Generated post"]}'
+    assert observed["timeout_ms"] == 18_750
+
+
 def test_gemini_transient_failure_surfaces_api_error_instead_of_local_copy(monkeypatch):
     monkeypatch.setattr(generator, "AI_PROVIDER", "gemini")
     monkeypatch.setattr(generator, "GEMINI_API_KEY", "test-key")

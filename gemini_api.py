@@ -15,7 +15,7 @@ from google.genai import types
 
 from config import GEMINI_API_KEY, GEMINI_MODEL
 
-TIMEOUT_MS = 20_000
+TIMEOUT_MS = 90_000
 GEMINI_TIMEOUT_MS = TIMEOUT_MS
 THINKING_LEVEL = "low"
 HEADROOM_TOKENS = 512

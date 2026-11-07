@@ -59,6 +59,7 @@ def test_client_uses_v1beta_for_json_response_mode(monkeypatch):
 
     assert calls["api_key"] == "test-key"
     assert calls["http_options"].api_version == "v1beta"
+    assert gemini_api.GEMINI_TIMEOUT_MS == 90_000
     assert calls["http_options"].timeout == gemini_api.GEMINI_TIMEOUT_MS
 
 

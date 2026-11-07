@@ -69,8 +69,9 @@ Interactions API via `gemini_api.py`; they do not call the legacy
 `generateContent` endpoint. Set `GEMINI_API_KEY` in the deployment secrets and
 use `GEMINI_MODEL=gemini-3.8-flash` (the default). Gemini API errors are shown
 as generation failures rather than being replaced with local template copy.
-Generation requests use a shared 18-second time budget and may be split across
-parallel calls for multiple posts. Optional comma-separated fallback models can
+Generation requests use a 75-second time budget, with a 90-second client
+timeout, and may be split across parallel calls for multiple posts. Optional
+comma-separated fallback models can
 be set with `GEMINI_FALLBACK_MODELS`; only configured models are tried.
 Compliance validation uses its own JSON response shape and fails closed if the
 independent AI review cannot complete. Ollama can be selected explicitly with
