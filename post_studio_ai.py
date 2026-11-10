@@ -105,6 +105,9 @@ class Guidelines:
     logo_mode: str = "Smart (auto)"
     hashtags: bool = True
     seed: int = 0
+    ai_art: bool = True                                   # v3: generate a unique background picture per post
+    art_style: str = "Auto (AI chooses)"                  # v3: or one of ps.ART_STYLES
+    art_source: str = "Generated art (offline)"           # v3: or 'Flat colours only'
 
 
 # ---------------------------------------------------------------------------
@@ -420,9 +423,121 @@ def add_decor(spec, rng, area, reserved_extra, count: int) -> None:
             break
 
 
-def build_slide(c, g, rng, idx, n, fmt, pal, used, contact, logo_img, logo_name, photo=None, logo_mode="Smart (auto)"):
+# ---------------------------------------------------------------------------
+# v3: AI art direction - every post gets its own generated picture, icon and motion
+# ---------------------------------------------------------------------------
+
+ART_SUBJECTS: dict[str, dict] = {
+    "protection": dict(words=["insurance", "protect", "secure", "safety", "cover", "risk", "shield", "trust", "guard", "claim"],
+                       icons=["shield", "umbrella", "lock", "check"],
+                       styles={"mesh_glow": 3, "waves": 3, "landscape": 2, "papercut": 2, "rays": 1}),
+    "family": dict(words=["family", "kids", "child", "parent", "children", "baby", "partner", "together", "generation"],
+                   icons=["family", "heart", "house", "umbrella"],
+                   styles={"landscape": 3, "blobs": 3, "mesh_glow": 2, "rays": 2, "papercut": 2}),
+    "money": dict(words=["money", "saving", "savings", "pension", "retire", "invest", "wealth", "income", "tax", "budget",
+                         "mortgage", "debt", "finance", "financial", "cash", "fund", "interest", "portfolio"],
+                  icons=["coins", "chart", "target", "clock"],
+                  styles={"skyline": 3, "waves": 3, "facets": 2, "mesh_glow": 2, "topo": 1, "papercut": 2}),
+    "growth": dict(words=["growth", "grow", "scale", "success", "goal", "plan", "future", "rise", "boost", "strategy", "progress"],
+                   icons=["chart", "rocket", "target", "star"],
+                   styles={"landscape": 3, "rays": 3, "mesh_glow": 2, "papercut": 2, "waves": 2, "aurora": 1}),
+    "home": dict(words=["house", "home", "property", "rent", "buy", "moving", "housing"],
+                 icons=["house", "lock", "check"],
+                 styles={"landscape": 3, "skyline": 3, "blobs": 2, "papercut": 2, "mesh_glow": 1}),
+    "health": dict(words=["health", "wellness", "fitness", "yoga", "medical", "care", "mind", "sleep", "mental", "calm"],
+                   icons=["heart", "leaf", "check", "star"],
+                   styles={"blobs": 3, "bokeh": 3, "waves": 2, "mesh_glow": 2, "papercut": 2}),
+    "nature": dict(words=["eco", "green", "nature", "organic", "sustain", "planet", "garden", "outdoor", "earth"],
+                   icons=["leaf", "heart", "star"],
+                   styles={"landscape": 4, "blobs": 2, "papercut": 2, "bokeh": 2}),
+    "tech": dict(words=["tech", "digital", "software", "data", "cyber", "cloud", "online", "code", "automation", "crypto"],
+                 icons=["bulb", "lock", "rocket", "target", "chart"],
+                 styles={"synth": 3, "stars": 3, "topo": 2, "aurora": 2, "facets": 2, "mesh_glow": 2}),
+    "learning": dict(words=["learn", "tips", "guide", "how to", "education", "course", "skill", "knowledge", "ideas", "ways", "steps", "myth"],
+                     icons=["bulb", "target", "check", "star"],
+                     styles={"mesh_glow": 3, "facets": 2, "papercut": 3, "halftone": 2, "blobs": 2}),
+    "celebrate": dict(words=["congrat", "celebrat", "birthday", "anniversary", "winner", "party", "festival", "thank", "welcome", "launch"],
+                      icons=["star", "heart", "rocket"],
+                      styles={"halftone": 3, "blobs": 3, "rays": 3, "bokeh": 2, "papercut": 2}),
+    "luxury": dict(words=["luxury", "premium", "exclusive", "elite", "elegant", "heritage", "legacy", "private", "bespoke"],
+                   icons=["star", "check", "lock"],
+                   styles={"stars": 3, "bokeh": 3, "aurora": 2, "mesh_glow": 3, "waves": 2}),
+}
+ART_MOTION = {"trustworthy": "calm", "energetic": "energetic", "calm": "calm", "luxury": "elegant",
+              "techy": "techy", "playful": "playful"}
+
+
+def art_subject(g: Guidelines, copy: dict) -> str:
+    """Picks the subject family (family, money, tech ...) that best matches the topic and slide copy."""
+    blob = " " + " ".join([g.topic, g.goal, g.tone] + [" ".join(str(v) for v in s.values()) for s in copy.get("slides", [])]).lower() + " "
+    scores = {k: sum(blob.count(w) for w in v["words"]) for k, v in ART_SUBJECTS.items()}
+    best = max(scores, key=scores.get)
+    if scores[best] > 0:
+        return best
+    return {"luxury": "luxury", "techy": "tech", "playful": "celebrate", "energetic": "growth", "calm": "health"}.get(
+        copy.get("mood") or g.mood, "learning")
+
+
+def pick_art_style(g: Guidelines, rng: random.Random, subject: str, dark: bool) -> str:
+    """The style the user forced, or one the subject favours. Dark-only styles are avoided on light palettes."""
+    forced = getattr(g, "art_style", "")
+    if forced in ps.ART_STYLES:
+        return forced
+    weights = dict(ART_SUBJECTS[subject]["styles"])
+    if not dark:
+        for s in list(weights):
+            if s in ps.DARK_ONLY:
+                weights.pop(s)
+        weights = weights or {"papercut": 1}
+    keys = list(weights)
+    return rng.choices(keys, weights=[weights[k] for k in keys])[0]
+
+
+def make_art_slices(style: str, n: int, fmt: str, pal, dark: bool, seed: int) -> list:
+    """One background per slide. Most styles are drawn as a single wide panorama and sliced, so the carousel flows."""
+    W, H = ps.FORMATS.get(fmt, ps.FORMATS["square"])
+    w, h = int(W * 0.6), int(H * 0.6)
+    if n > 1 and style not in ("halftone", "synth", "rays"):
+        big = ps.generate_art(style, (w * n, h), pal, dark, seed)
+        return [big.crop((i * w, 0, (i + 1) * w, h)) for i in range(n)]
+    return [ps.generate_art(style, (w, h), pal, dark, seed + i * 7919) for i in range(n)]
+
+
+def _art_icon(name: str, pal) -> Image.Image:
+    """Topic icon medallion in the post's palette: a ready-made 'add-on' picture."""
+    dark_bg = ps._lum(pal.cta_bg) < 0.6
+    bg_a, bg_b = (pal.cta_bg, ps._mix(pal.cta_bg, pal.peek, 0.5))
+    fg = (255, 255, 255) if dark_bg else (20, 22, 36)
+    ac = ps._mix(pal.peek, (255, 255, 255), 0.35) if dark_bg else ps._mix(pal.card, (0, 0, 0), 0.1)
+    ac = ac if _ratio(ac, bg_a) > 1.6 else (255, 214, 90)
+    return ps.icon_medallion(name, 320, bg_a, bg_b, fg, ac, (255, 255, 255), "circle")
+
+
+def _fix_art_contrast(spec) -> None:
+    """Samples the rendered background (cards and art, without text) under every text block and picks the
+    ink with the better contrast ratio. Keeps text readable whatever picture the design generated."""
+    bgimg = ps.render(spec, scale=0.5, include_text=False).convert("RGB")
+    W, H = bgimg.size
+    for tl in spec.text_layers:
+        if tl.kind not in ("headline", "body") or not tl.text.strip() or tl.style.highlight:
+            continue
+        x0, y0, x1, y1 = _text_box(tl, *_fmt_size(spec))
+        crop = bgimg.crop((int(x0 * W), int(y0 * H), max(int(x0 * W) + 1, int(x1 * W)), max(int(y0 * H) + 1, int(y1 * H))))
+        mean = tuple(int(v) for v in np.asarray(crop, np.float32).reshape(-1, 3).mean(axis=0))
+        light, dark_ink = (255, 255, 255), (20, 22, 36)
+        tl.style.color = light if _ratio(light, mean) >= _ratio(dark_ink, mean) else dark_ink
+        tl.style.color_role = "custom"
+
+
+def _slide_ratio(spec) -> float:
+    W, H = _fmt_size(spec)
+    return W / H
+
+
+def build_slide(c, g, rng, idx, n, fmt, pal, used, contact, logo_img, logo_name, photo=None, logo_mode="Smart (auto)",
+               art=None, motion_mood="calm", icon=None):
     last, cover = (idx == n - 1 and n > 1), idx == 0
-    tpl = pick_template(rng, used, fmt, photo is not None)
+    tpl = pick_template(rng, used, fmt, photo is not None or art is not None)
     used.append(tpl)
     headline = _limit(_clean(c.get("headline", "")), g.max_headline_words) or "Your headline"
     body = _limit(_clean(c.get("body", "")), g.max_body_words * 2 if g.max_body_words else 0)
@@ -480,12 +595,30 @@ def build_slide(c, g, rng, idx, n, fmt, pal, used, contact, logo_img, logo_name,
         bg.zoom = round(rng.uniform(1.0, 1.5), 2)
         bg.tint, bg.tint_alpha = (0, 0, 0), round(rng.uniform(0.3, 0.45), 2)
         spec.effects.look = rng.choice(["none", "vivid", "warm", "cool", "dreamy"])
+    elif art is not None:
+        dark = ps._lum(pal.bg) < 0.55
+        scrim_col = ps._mix(pal.bg, (0, 0, 0), 0.45) if dark else ps._mix(pal.bg, (255, 255, 255), 0.55)
+        art = ps.apply_scrim(art.convert("RGB"), scrim_col, "bottom", 0.5, 0.2, 1.0)
+        bg = spec.background
+        bg.image, bg.placement = art, "full"
+        bg.focus_x = 0.5
     elif rng.random() < 0.38:
         spec.gradient = ps.Gradient(True, pal.bg, ps._mix(pal.bg, pal.peek, rng.uniform(0.25, 0.5)), round(rng.uniform(0, 360)),
                                     "radial" if rng.random() < 0.3 else "linear")
     spec.effects.grain = rng.choice([0, 0, 0.05, 0.1])
     if ps._lum(pal.bg) < 0.5:
         spec.effects.vignette = rng.choice([0, 0, 0.15, 0.3])
+
+    # v3 add-on: topic icon in the top-right corner, only where it is free of text
+    if icon and g.ai_art and not (fmt in ("story", "reel") and g.safe_zones and y0 < 0.2):
+        ix0, iy0, iw = 0.80, 0.05, 0.16
+        ih = iw * _slide_ratio(spec)
+        if iy0 + ih < y0 - 0.04 and not any(_overlap((ix0, iy0, ix0 + iw, iy0 + ih), r) > 0 for r in reserved):
+            spec.pictures.append(ps.BackgroundLayer(image=_art_icon(icon, pal), box=(ix0, iy0, ix0 + iw, iy0 + ih),
+                                                    label="Icon add-on"))
+
+    # v3 motion: the reel animation follows the post's mood
+    spec.motion = ps.Motion(mood=motion_mood)
 
     # contact + logo
     spec.contact = ps._clone(contact)
@@ -503,11 +636,22 @@ def build_carousel(copy: dict, g: Guidelines, rng, logo_img=None, photo=None) ->
     contact = ps.ContactInfo(phone=g.phone, email=g.email, website=g.website, show_phone=bool(g.phone), show_email=bool(g.email),
                              show_website=bool(g.website), enabled=g.show_contact, align="center", size=20)
     used, out = [], []
+    arts, icon_name, motion_mood = None, None, ART_MOTION.get(mood, "calm")
+    if g.ai_art and photo is None and not str(g.art_source).startswith("Flat"):
+        subject = art_subject(g, copy)
+        dark = ps._lum(base.bg) < 0.55
+        style = pick_art_style(g, rng, subject, dark)
+        arts = make_art_slices(style, n, fmt, base, dark, rng.randrange(1, 2 ** 31))
+        icon_name = rng.choice(ART_SUBJECTS[subject]["icons"])
     for i, c in enumerate(slides):
         pal = variant_palette(base, rng) if g.cohesive else pick_palette(g, rng, mood)
         ctc = ps._clone(contact)
         ctc.enabled = g.show_contact and (n == 1 or g.contact_on == "All slides" or i == n - 1)
-        out.append(build_slide(c, g, rng, i, n, fmt, pal, used, ctc, logo_img, g.brand_name, photo, g.logo_mode))
+        slide = build_slide(c, g, rng, i, n, fmt, pal, used, ctc, logo_img, g.brand_name, photo, g.logo_mode,
+                            art=arts[i] if arts else None, motion_mood=motion_mood, icon=icon_name)
+        if arts:
+            _fix_art_contrast(slide)
+        out.append(slide)
     return ps.CarouselSpec(slides=out, indicator=rng.choice(["dots", "bar", "numbers"]) if n > 1 else "none", swipe=n > 1)
 
 
@@ -983,6 +1127,15 @@ def _ui_generator(st) -> None:
             g.cohesive = h1.checkbox("Cohesive carousel colours", g.cohesive, key="g_coh", help="Off = every slide gets a totally different palette")
             g.safe_zones = h2.checkbox("Respect story safe zones", g.safe_zones, key="g_safe")
             h3.caption("Copy remains as approved in the Generate tab.")
+            st.markdown("**AI art**")
+            v1, v2, v3 = st.columns(3)
+            g.art_source = v1.selectbox("Background", ["Generated art (offline)", "Flat colours only"],
+                                        index=0 if not str(g.art_source).startswith("Flat") else 1, key="g_asrc",
+                                        help="Generated art creates a unique picture for every post.")
+            styles_ui = ["Auto (AI chooses)"] + list(ps.ART_STYLES)
+            g.art_style = v2.selectbox("Art style", styles_ui, index=styles_ui.index(g.art_style) if g.art_style in styles_ui else 0, key="g_astyle")
+            g.ai_art = bool(g.ai_art) and not str(g.art_source).startswith("Flat")
+            v3.caption("Topic icons, add-ons and reel motion are chosen automatically to suit each post.")
             g.use_brand_colors = st.checkbox("Use my brand colours", g.use_brand_colors, key="g_ubc")
             if g.use_brand_colors:
                 q1, q2 = st.columns(2)

@@ -1,6 +1,6 @@
 """
-post_studio.py  (v2 - advanced edition)
-=======================================
+post_studio.py  (v3 - AI art & smart motion edition)
+====================================================
 
 A social-post, carousel and reel studio built on Pillow, NumPy, Streamlit and ImageIO.
 
@@ -26,6 +26,23 @@ Studio
 Reels
   * Streaming frame renderer (low memory), Ken Burns modes, text-reveal animation,
     5 transitions, per-slide durations, 720p / full-size, MP4 with automatic GIF fallback.
+
+What's new in v3 (everything above is unchanged)
+------------------------------------------------
+AI art engine (offline, no downloads)
+  * generate_art(): 14 palette-aware procedural background styles (mesh glow, aurora, bokeh, waves, landscape,
+    skyline, topo, synth, facets, rays, blobs, paper-cut, stars, halftone) - different for every seed.
+  * icon_medallion(): topic icons on gradient discs / tiles; decor_image(): dots, plus signs, rings, waves,
+    sparkles, stripes, brackets, swoosh; apply_scrim(): legibility gradients for text areas.
+  * "ai_canvas" free-canvas template used by the AI design director in post_studio_ai.py.
+  * Text 'button' styling (highlight_pad / highlight_radius) for pill-shaped badges and CTAs.
+
+Smart motion for reels
+  * Motion (per slide) + plan_reel(): every slide's animation is chosen from the post itself (mood, text, layout):
+    layered text entrances (rise, slide, pop, zoom, line-wipe), floating / spinning decor, CTA emphasis,
+    ambient particles (bokeh, sparkle, dust, confetti, light sweep), camera moves and transitions.
+  * Reading-time based slide lengths, preview_slide_motion() for a quick GIF preview.
+  * export_reel_video(..., smart=True) (default in the studio); the classic engine is still available.
 """
 
 from __future__ import annotations
@@ -34,11 +51,13 @@ import base64
 import colorsys
 import copy
 import dataclasses
+import hashlib
 import io
 import json
 import math
 import os
 import random
+import re
 import tempfile
 import uuid
 import zipfile
@@ -74,6 +93,9 @@ __all__ = [
     "random_palette", "harmony_palette", "palette_from_image", "make_palette",
     "project_to_bytes", "project_from_bytes", "export_image", "export_carousel_zip",
     "export_carousel_pdf", "missing_fonts",
+    "Motion", "plan_reel", "preview_slide_motion", "infer_motion_mood", "ENTRANCES", "AMBIENTS",
+    "ART_STYLES", "generate_art", "art_colors", "apply_scrim", "scrim_image", "ghost_number", "DARK_ONLY", "icon_medallion", "icon_glyph", "ICON_GLYPHS",
+    "decor_image", "DECOR_KINDS",
 ]
 
 # ---------------------------------------------------------------------------
@@ -515,6 +537,834 @@ def _shadowed(tile: Image.Image, color: RGB, blur: float, dx: float, dy: float, 
 
 
 # ---------------------------------------------------------------------------
+# AI art engine (offline): generated backgrounds, topic icons, decor kits, scrims
+# ---------------------------------------------------------------------------
+
+ART_STYLES = ["mesh_glow", "aurora", "bokeh", "waves", "landscape", "skyline", "topo", "synth",
+              "facets", "rays", "blobs", "papercut", "stars", "halftone"]
+
+
+def _np_rng(seed) -> np.random.Generator:
+    return np.random.default_rng(abs(int(seed)) % (2 ** 32))
+
+
+def _fbm(h: int, w: int, rng: np.random.Generator, octaves: int = 4, base: int = 3, gain: float = 0.5) -> np.ndarray:
+    """Smooth fractal value-noise in 0..1 (float32, h x w)."""
+    out = np.zeros((h, w), np.float32)
+    amp, tot = 1.0, 0.0
+    for o in range(octaves):
+        gw = base * (2 ** o) + 1
+        gh = max(2, int(round(gw * h / max(1, w))) + 1)
+        grid = rng.random((gh, gw)).astype(np.float32)
+        layer = np.asarray(Image.fromarray(grid, "F").resize((w, h), Image.Resampling.BICUBIC), np.float32)
+        out += layer * amp
+        tot += amp
+        amp *= gain
+    out /= tot
+    lo, hi = float(out.min()), float(out.max())
+    return (out - lo) / max(1e-6, hi - lo)
+
+
+def _coords(h: int, w: int):
+    ys = (np.arange(h, dtype=np.float32) + 0.5) / h
+    xs = (np.arange(w, dtype=np.float32) + 0.5) / w
+    return np.meshgrid(xs, ys)
+
+
+def _ramp(t: np.ndarray, stops: list[tuple[float, RGB]]) -> np.ndarray:
+    pos = [s[0] for s in stops]
+    out = np.empty(t.shape + (3,), np.float32)
+    for ch in range(3):
+        out[..., ch] = np.interp(t, pos, [s[1][ch] for s in stops])
+    return out
+
+
+def _to_img(a: np.ndarray) -> Image.Image:
+    return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "RGB")
+
+
+def _blur(img: Image.Image, r: float) -> Image.Image:
+    return img.filter(ImageFilter.GaussianBlur(r)) if r > 0.3 else img
+
+
+def art_colors(pal, dark: bool = True) -> dict[str, RGB]:
+    """Colour story used by every art style, derived from the palette."""
+    k = (0, 0, 0)
+    w = (255, 255, 255)
+    if dark:
+        base = pal.bg if _lum(pal.bg) < 0.22 else _mix(pal.bg, k, 0.62 if _lum(pal.bg) > 0.4 else 0.45)
+        deep = _mix(base, k, 0.45)
+        glow = pal.peek if _lum(pal.peek) > 0.25 else _mix(pal.peek, w, 0.35)
+        accent = pal.cta_bg if _lum(pal.cta_bg) > 0.2 else _mix(pal.cta_bg, w, 0.3)
+        mid = _mix(base, glow, 0.38)
+        light = _mix(glow, w, 0.55)
+    else:
+        base = pal.bg if _lum(pal.bg) > 0.7 else _mix(pal.bg, w, 0.75)
+        deep = _mix(base, pal.card if _lum(pal.card) < 0.6 else pal.peek, 0.35)
+        glow = pal.peek
+        accent = pal.cta_bg
+        mid = _mix(base, glow, 0.45)
+        light = _mix(base, w, 0.6)
+    return dict(base=base, deep=deep, glow=glow, accent=accent, mid=mid, light=light, dark=dark)
+
+
+def _finish(arr: np.ndarray, rng: np.random.Generator, grain: float = 3.0, vignette: float = 0.0) -> Image.Image:
+    h, w = arr.shape[:2]
+    if vignette > 0:
+        xx, yy = _coords(h, w)
+        d = np.sqrt((xx - .5) ** 2 + (yy - .5) ** 2) / 0.7071
+        arr = arr * (1 - vignette * np.clip((d - 0.3) / 0.7, 0, 1) ** 1.5)[..., None]
+    if grain > 0:
+        arr = arr + rng.normal(0, grain, (h, w, 1)).astype(np.float32)
+    return _to_img(arr)
+
+
+def _blobs_field(h, w, rng, cols: list[RGB], base: RGB, count: int, spread: float = 0.55, warp: float = 0.12,
+                 strength=(0.45, 0.95)) -> np.ndarray:
+    xx, yy = _coords(h, w)
+    nx, ny = _fbm(h, w, rng, 3, 2), _fbm(h, w, rng, 3, 2)
+    xw, yw = xx + (nx - .5) * warp * 2, yy + (ny - .5) * warp * 2
+    asp = w / h
+    img = np.empty((h, w, 3), np.float32)
+    img[:] = np.asarray(base, np.float32)
+    for i in range(count):
+        cx, cy = rng.uniform(-0.1, 1.1), rng.uniform(-0.1, 1.1)
+        r = rng.uniform(0.18, spread)
+        a = np.exp(-(((xw - cx) * asp) ** 2 + (yw - cy) ** 2) / (2 * r * r * 0.5)) * rng.uniform(*strength)
+        col = np.asarray(cols[i % len(cols)], np.float32)
+        img = img * (1 - a[..., None]) + col * a[..., None]
+    return img
+
+
+def _ridge(n: int, rng: np.random.Generator, rough: float = 0.55, octaves: int = 6) -> np.ndarray:
+    x = np.linspace(0, 1, n, dtype=np.float32)
+    y = np.zeros(n, np.float32)
+    amp, f = 1.0, rng.uniform(1.2, 2.4)
+    for _ in range(octaves):
+        y += amp * np.sin(2 * math.pi * (f * x + rng.random()) + rng.random() * 6.28)
+        amp *= rough
+        f *= 2.05
+    y -= y.min()
+    return y / max(1e-6, y.max())
+
+
+def _mask_fill(size, painter, ss: int = 2) -> Image.Image:
+    w, h = size
+    m = Image.new("L", (w * ss, h * ss), 0)
+    painter(ImageDraw.Draw(m), ss)
+    return m.resize((w, h), Image.Resampling.BOX) if ss > 1 else m
+
+
+def _paste_col(img: Image.Image, col, mask: Image.Image, alpha: float = 1.0) -> None:
+    if alpha < 1:
+        mask = mask.point(lambda v: int(v * alpha))
+    img.paste(tuple(int(c) for c in col), (0, 0), mask)
+
+
+# --- individual styles ------------------------------------------------------
+
+def art_mesh_glow(size, C, rng, r):
+    w, h = size
+    cols = [C["glow"], C["accent"], C["glow"], C["mid"]] if C["dark"] else [C["glow"], C["accent"], C["mid"], C["light"]]
+    base = C["deep"] if C["dark"] else C["base"]
+    img = _blobs_field(h, w, rng, cols, base, count=int(rng.integers(4, 6)), spread=0.5, warp=0.2, strength=(0.55, 1.0))
+    xx, yy = _coords(h, w)
+    flow = _fbm(h, w, rng, 3, 2)
+    k = r.uniform(0.9, 1.6)
+    silk = (np.sin((xx * r.uniform(0.5, 1.0) + yy * r.uniform(0.6, 1.1) + flow * 0.9) * 2 * math.pi * k) * 0.5 + 0.5) ** 2
+    img = img + np.asarray(C["light"], np.float32) * (silk * (0.05 if C["dark"] else 0.03))[..., None]
+    if C["dark"]:
+        img *= (0.78 + 0.22 * (1 - yy))[..., None]
+    return _finish(img, rng, 3.0, 0.3 if C["dark"] else 0.06)
+
+
+def art_aurora(size, C, rng, r):
+    w, h = size
+    xx, yy = _coords(h, w)
+    img = _ramp(yy, [(0, _mix(C["deep"], (0, 0, 0), 0.3)), (0.6, C["base"]), (1, _mix(C["base"], C["mid"], 0.4))])
+    n = _fbm(h, w, rng, 4, 2)
+    cols = [C["glow"], C["accent"], C["light"], C["glow"]]
+    for i in range(r.randint(3, 5)):
+        y0 = r.uniform(0.15, 0.7)
+        ph, fr = r.uniform(0, 6.28), r.uniform(0.8, 1.8)
+        curve = y0 + 0.11 * np.sin(2 * math.pi * fr * xx + ph) + 0.07 * np.sin(2 * math.pi * 2.3 * xx + ph * 2) + (n - .5) * 0.18
+        th = r.uniform(0.035, 0.085)
+        a = np.exp(-((yy - curve) / th) ** 2) * r.uniform(0.35, 0.8)
+        a = a * (0.55 + 0.45 * np.sin(2 * math.pi * (xx * r.uniform(2, 5) + ph)) ** 2)
+        col = np.asarray(cols[i % len(cols)], np.float32)
+        img = img + col * a[..., None] * 0.9
+    glow = _to_img(img).filter(ImageFilter.GaussianBlur(max(3, w / 90)))
+    img = np.maximum(img, np.asarray(glow, np.float32) * 1.05)
+    return _finish(img, rng, 2.5, 0.25)
+
+
+def art_bokeh(size, C, rng, r):
+    w, h = size
+    base = _blobs_field(h, w, rng, [C["mid"], C["glow"], C["accent"]], C["base"], 4, 0.6, 0.1, (0.25, 0.6))
+    img = _to_img(base)
+    asp_r = min(w, h)
+    for layer, (blur, cnt, rr, al) in enumerate(((asp_r * 0.018, 9, (0.07, 0.16), 70),
+                                                 (asp_r * 0.006, 12, (0.03, 0.09), 90),
+                                                 (0, 14, (0.012, 0.04), 120))):
+        ov = Image.new("RGBA", size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(ov)
+        for _ in range(cnt):
+            cx, cy, rad = r.uniform(-0.05, 1.05) * w, r.uniform(-0.05, 1.05) * h, r.uniform(*rr) * asp_r
+            col = r.choice([C["glow"], C["accent"], C["light"], C["glow"]])
+            d.ellipse((cx - rad, cy - rad, cx + rad, cy + rad), fill=(*col, r.randint(int(al * .5), al)))
+            if layer < 2:
+                d.ellipse((cx - rad, cy - rad, cx + rad, cy + rad), outline=(*col, min(255, al * 2)), width=max(1, int(rad * 0.04)))
+        ov = _blur(ov, blur)
+        img = Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB")
+    return _finish(np.asarray(img, np.float32), rng, 2.5, 0.28)
+
+
+def art_waves(size, C, rng, r):
+    w, h = size
+    xx, yy = _coords(h, w)
+    img = _ramp(yy, [(0, C["deep"]), (0.55, C["base"]), (1, _mix(C["base"], C["glow"], 0.35))])
+    img = _to_img(img)
+    n = r.randint(4, 6)
+    y0 = r.uniform(0.38, 0.55)
+    x = np.linspace(0, 1, w, dtype=np.float32)
+    for i in range(n):
+        t = i / max(1, n - 1)
+        yb = y0 + t * (0.95 - y0) * 0.95
+        amp = 0.045 + 0.03 * (1 - t)
+        ph = r.uniform(0, 6.28)
+        crest = (yb + amp * np.sin(2 * math.pi * r.uniform(0.7, 1.4) * x + ph) + amp * 0.5 * np.sin(2 * math.pi * r.uniform(1.8, 3) * x + ph * 1.7)) * h
+        col = _mix(C["mid"], C["glow"] if i % 2 else C["accent"], 0.25 + 0.4 * t)
+        col = _mix(col, C["deep"], 0.55 - 0.45 * t)
+
+        def paint(d, ss, crest=crest):
+            pts = [(0, h * ss)] + [(j * ss, crest[j] * ss) for j in range(0, w, 3)] + [(w * ss, crest[-1] * ss), (w * ss, h * ss)]
+            d.polygon(pts, fill=255)
+        m = _mask_fill(size, paint, 2)
+        # soft shadow above the crest, then the layer itself
+        sh = m.filter(ImageFilter.GaussianBlur(h * 0.012)).point(lambda v: int(v * 0.35))
+        img.paste((0, 0, 0), (0, int(-h * 0.008)), sh)
+        _paste_col(img, col, m, 0.92)
+        hl = m.filter(ImageFilter.GaussianBlur(1.2))
+        edge = Image.fromarray(np.clip(np.asarray(m, np.int16) - np.asarray(hl.transform(hl.size, Image.Transform.AFFINE, (1, 0, 0, 0, 1, -max(3, int(h * 0.004)))), np.int16), 0, 255).astype(np.uint8))
+        _paste_col(img, C["light"], edge, 0.5)
+    return _finish(np.asarray(img, np.float32), rng, 2.5, 0.12)
+
+
+def art_landscape(size, C, rng, r):
+    w, h = size
+    xx, yy = _coords(h, w)
+    hor = r.uniform(0.52, 0.66)
+    sky = _ramp(yy / hor, [(0, C["deep"]), (0.65, C["base"]), (1.0, _mix(C["base"], C["glow"], 0.55 if C["dark"] else 0.7))])
+    sx, sy = r.uniform(0.2, 0.8), r.uniform(hor - 0.25, hor - 0.08)
+    asp = w / h
+    d2 = ((xx - sx) * asp) ** 2 + (yy - sy) ** 2
+    sky = sky + np.asarray(C["accent"], np.float32) * (np.exp(-d2 / 0.05) * 0.55 + np.exp(-d2 / 0.006) * 0.8)[..., None]
+    img = _to_img(sky)
+    d = ImageDraw.Draw(img)
+    rad = min(w, h) * r.uniform(0.045, 0.08)
+    d.ellipse((sx * w - rad, sy * h - rad, sx * w + rad, sy * h + rad), fill=tuple(C["light"]))
+    if C["dark"]:
+        for _ in range(60):
+            px, py = r.uniform(0, w), r.uniform(0, hor * h * 0.7)
+            s = r.choice([1, 1, 2])
+            d.ellipse((px, py, px + s, py + s), fill=(*C["light"],))
+    layers = r.randint(4, 5)
+    for i in range(layers):
+        t = i / (layers - 1)
+        base_y = (hor - 0.05 + t * (1 - hor + 0.02)) * h
+        height = (0.20 - 0.1 * t) * h
+        prof = _ridge(w // 2 + 1, rng, 0.5 + 0.08 * (1 - t))
+        prof = np.interp(np.linspace(0, len(prof) - 1, w), np.arange(len(prof)), prof)
+        top = base_y - prof * height
+        col = _mix(_mix(C["base"], C["glow"], 0.35 * (1 - t)), C["deep"], 0.25 + 0.7 * t)
+
+        def paint(dd, ss, top=top):
+            pts = [(0, h * ss)] + [(j * ss, top[j] * ss) for j in range(0, w, 2)] + [(w * ss, top[-1] * ss), (w * ss, h * ss)]
+            dd.polygon(pts, fill=255)
+        m = _mask_fill(size, paint, 2)
+        _paste_col(img, col, m, 1.0)
+        fog = Image.new("L", size, 0)
+        fg = np.clip(1 - np.abs((yy * h - base_y) / (h * 0.09)), 0, 1) * (0.28 * (1 - t))
+        fog = Image.fromarray((fg * 255).astype(np.uint8))
+        _paste_col(img, _mix(C["glow"], C["base"], 0.4), ImageChops.multiply(fog, m), 0.7)
+    return _finish(np.asarray(img, np.float32), rng, 2.5, 0.16)
+
+
+def art_skyline(size, C, rng, r):
+    w, h = size
+    xx, yy = _coords(h, w)
+    hor = r.uniform(0.62, 0.78)
+    sky = _ramp(yy / hor, [(0, C["deep"]), (0.6, C["base"]), (1, _mix(C["base"], C["glow"], 0.75))])
+    sky = sky + np.asarray(C["accent"], np.float32) * (np.exp(-((yy - hor) / 0.09) ** 2) * 0.45)[..., None]
+    img = _to_img(sky)
+    d = ImageDraw.Draw(img, "RGBA")
+    for layer in range(3):
+        t = layer / 2
+        col = _mix(_mix(C["base"], C["glow"], 0.45 * (1 - t)), C["deep"], 0.2 + 0.6 * t)
+        x = -r.uniform(0, 40)
+        while x < w:
+            bw = r.uniform(0.045, 0.11 - 0.02 * t) * w
+            bh = r.uniform(0.07, 0.30 - 0.07 * layer) * h * (1 + (0.2 if 0.25 < x / w < 0.75 else 0))
+            top = hor * h - bh + layer * h * 0.035
+            d.rectangle((x, top, x + bw, h), fill=(*col, 255))
+            if r.random() < 0.18:
+                d.rectangle((x + bw * .45, top - bh * .12, x + bw * .55, top), fill=(*col, 255))
+            wy = top + bw * 0.12
+            lit = _mix(C["light"], C["accent"], 0.4)
+            cell = max(5, bw / 6)
+            while wy < hor * h + h * 0.02 and layer < 2:
+                wx = x + cell * 0.6
+                while wx < x + bw - cell:
+                    if r.random() < 0.3:
+                        d.rectangle((wx, wy, wx + cell * 0.45, wy + cell * 0.55), fill=(*lit, r.randint(110, 220)))
+                    wx += cell
+                wy += cell * 1.3
+            x += bw * r.uniform(0.9, 1.05)
+    ground = Image.new("L", size, 0)
+    ImageDraw.Draw(ground).rectangle((0, hor * h + h * 0.04, w, h), fill=255)
+    _paste_col(img, C["deep"], ground, 0.95)
+    return _finish(np.asarray(_blur(img, 0.6), np.float32), rng, 2.5, 0.2)
+
+
+def art_topo(size, C, rng, r):
+    w, h = size
+    xx, yy = _coords(h, w)
+    base = _blobs_field(h, w, rng, [C["mid"], C["glow"]], C["base"], 3, 0.7, 0.05, (0.2, 0.5))
+    field = _fbm(h, w, rng, 5, 2, 0.55)
+    n = r.randint(14, 22)
+    v = field * n
+    dist = np.abs((v % 1.0) - 0.5) * 2  # 0 at the line centre-ish
+    width = 0.1 + 0.05 * r.random()
+    line = np.clip(1 - dist / width, 0, 1) ** 1.2
+    line = np.asarray(Image.fromarray((line * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8)), np.float32) / 255
+    base = base + np.asarray(C["glow"], np.float32) * (line * 0.55)[..., None] * (0.4 + 0.6 * yy)[..., None]
+    major = np.clip(1 - np.abs(((field * n / 5) % 1.0) - 0.5) * 2 / 0.08, 0, 1)
+    base = base + np.asarray(C["light"], np.float32) * (major * 0.35)[..., None]
+    return _finish(base, rng, 2.5, 0.2)
+
+
+def art_synth(size, C, rng, r):
+    w, h = size
+    xx, yy = _coords(h, w)
+    hor = r.uniform(0.55, 0.68)
+    img = _ramp(yy / hor, [(0, C["deep"]), (0.6, _mix(C["base"], C["accent"], 0.25)), (1.0, _mix(C["accent"], C["glow"], 0.4))])
+    img[yy > hor] = np.asarray(_mix(C["deep"], (0, 0, 0), 0.4), np.float32)
+    pic = _to_img(img)
+    d = ImageDraw.Draw(pic, "RGBA")
+    rad = min(w, h) * r.uniform(0.17, 0.25)
+    cx, cy = w * r.uniform(0.35, 0.65), hor * h - rad * 0.55
+    sun = Image.new("L", size, 0)
+    ImageDraw.Draw(sun).ellipse((cx - rad, cy - rad, cx + rad, cy + rad), fill=255)
+    cut = Image.new("L", size, 255)
+    cd = ImageDraw.Draw(cut)
+    for i in range(7):
+        y = cy + rad * (0.05 + i * 0.14)
+        cd.rectangle((0, y, w, y + rad * (0.02 + i * 0.018)), fill=0)
+    sunm = ImageChops.multiply(sun, cut)
+    grad = _to_img(_ramp((yy - (cy - rad)) / (2 * rad), [(0, C["accent"]), (1, C["glow"])]))
+    glow = sun.filter(ImageFilter.GaussianBlur(rad * 0.35)).point(lambda v: int(v * 0.6))
+    pic.paste(tuple(C["accent"]), (0, 0), glow)
+    pic.paste(grad, (0, 0), sunm)
+    d = ImageDraw.Draw(pic, "RGBA")
+    gy0 = hor * h
+    for k in range(-14, 15):
+        x1 = w / 2 + k * w * 0.16
+        d.line((w / 2 + k * w * 0.012, gy0, x1, h), fill=(*C["glow"], 150), width=max(1, int(w / 400)))
+    t = 0.0
+    while gy0 + t < h:
+        step = (t / (h - gy0) + 0.04)
+        y = gy0 + (step ** 2) * (h - gy0) * 1.05
+        d.line((0, y, w, y), fill=(*C["glow"], 160), width=max(1, int(w / 450) + int(step * 3)))
+        t += (h - gy0) * 0.07
+    return _finish(np.asarray(pic, np.float32) + np.asarray(_blur(pic, w / 120), np.float32) * 0.35, rng, 2.5, 0.2)
+
+
+def art_facets(size, C, rng, r):
+    w, h = size
+    cols_n = r.randint(5, 8)
+    cell = w / cols_n
+    rows_n = int(h / cell) + 2
+    pts = [[(i * cell + r.uniform(-.32, .32) * cell, j * cell + r.uniform(-.32, .32) * cell) for i in range(-1, cols_n + 2)]
+           for j in range(-1, rows_n + 1)]
+    field = _blobs_field(max(2, h // 4), max(2, w // 4), rng, [C["mid"], C["glow"], C["accent"], C["mid"]], C["base"], 5, 0.6, 0.1, (0.4, 0.9))
+    fh, fw = field.shape[:2]
+    img = Image.new("RGB", size, tuple(C["base"]))
+    d = ImageDraw.Draw(img)
+    for j in range(len(pts) - 1):
+        for i in range(len(pts[0]) - 1):
+            a, b, c2, e = pts[j][i], pts[j][i + 1], pts[j + 1][i + 1], pts[j + 1][i]
+            tris = [(a, b, c2), (a, c2, e)] if (i + j) % 2 else [(a, b, e), (b, c2, e)]
+            for tri in tris:
+                cx = sum(p[0] for p in tri) / 3
+                cy = sum(p[1] for p in tri) / 3
+                col = field[int(_clamp(cy / 4, 0, fh - 1)), int(_clamp(cx / 4, 0, fw - 1))]
+                col = col * r.uniform(0.9, 1.1)
+                c3 = tuple(int(_clamp(v, 0, 255)) for v in col)
+                d.polygon(tri, fill=c3, outline=c3)
+    return _finish(np.asarray(img, np.float32), rng, 2.0, 0.18)
+
+
+def art_rays(size, C, rng, r):
+    w, h = size
+    xx, yy = _coords(h, w)
+    ox, oy = r.uniform(0.2, 0.8), r.uniform(-0.1, 0.35)
+    asp = w / h
+    ang = np.arctan2(yy - oy, (xx - ox) * asp)
+    dist = np.sqrt(((xx - ox) * asp) ** 2 + (yy - oy) ** 2)
+    n = r.randint(9, 16)
+    ph = r.uniform(0, 6.28)
+    rays = (np.sin(ang * n + ph) * 0.5 + 0.5) ** 2.2
+    img = _blobs_field(h, w, rng, [C["mid"], C["glow"]], C["base"], 3, 0.7, 0.05, (0.3, 0.6))
+    fall = np.exp(-dist * 1.3)
+    k1, k2 = (0.5, 0.7) if C["dark"] else (0.16, 0.22)
+    img = img + np.asarray(C["glow"], np.float32) * (rays * fall * k1)[..., None]
+    img = img + np.asarray(C["accent"], np.float32) * (np.exp(-dist ** 2 / 0.05) * k2)[..., None]
+    return _finish(img, rng, 2.5, 0.2)
+
+
+def art_blobs(size, C, rng, r):
+    w, h = size
+    bg = _to_img(_ramp(_coords(h, w)[1], [(0, C["base"]), (1, _mix(C["base"], C["mid"], 0.4))]))
+    img = bg.convert("RGBA")
+    cols = [C["glow"], C["accent"], C["mid"], C["light"], C["deep"]]
+    for i in range(r.randint(5, 7)):
+        cx, cy = r.uniform(-0.1, 1.1) * w, r.uniform(-0.1, 1.1) * h
+        rad = r.uniform(0.18, 0.42) * min(w, h) * 1.2
+        k = r.randint(5, 8)
+        phs = [r.uniform(0, 6.28) for _ in range(3)]
+        amps = [r.uniform(0.05, 0.22), r.uniform(0.03, 0.12), r.uniform(0.01, 0.06)]
+        pts = []
+        for s in range(120):
+            a = 2 * math.pi * s / 120
+            rr = rad * (1 + amps[0] * math.sin(2 * a + phs[0]) + amps[1] * math.sin(3 * a + phs[1]) + amps[2] * math.sin(5 * a + phs[2]))
+            pts.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
+        m = Image.new("L", size, 0)
+        ImageDraw.Draw(m).polygon(pts, fill=255)
+        sh = m.filter(ImageFilter.GaussianBlur(min(w, h) * 0.02)).point(lambda v: int(v * 0.18))
+        sh_i = Image.new("RGBA", size, (0, 0, 0, 0))
+        sh_i.paste((0, 0, 0, 255), (int(w * 0.006), int(h * 0.012)), sh)
+        img = Image.alpha_composite(img, sh_i)
+        col = cols[i % len(cols)]
+        lay = Image.new("RGBA", size, (*col, 0))
+        lay.putalpha(m.point(lambda v: int(v * r.uniform(0.7, 0.95))))
+        img = Image.alpha_composite(img, lay)
+    return _finish(np.asarray(img.convert("RGB"), np.float32), rng, 3.0, 0.04)
+
+
+def art_papercut(size, C, rng, r):
+    w, h = size
+    xx, yy = _coords(h, w)
+    img = _to_img(_ramp(yy, [(0, C["base"]), (1, _mix(C["base"], C["mid"], 0.5))])).convert("RGBA")
+    n = r.randint(5, 7)
+    ang = r.uniform(-0.35, 0.35)
+    x = np.linspace(0, 1, w, dtype=np.float32)
+    cols = [C["mid"], C["glow"], C["accent"], C["deep"], C["mid"], C["glow"], C["light"]]
+    for i in range(n):
+        t = i / n
+        yb = (0.12 + 0.82 * t) * h
+        ph = r.uniform(0, 6.28)
+        crest = yb + h * (0.05 * np.sin(2 * math.pi * r.uniform(0.6, 1.3) * x + ph) + 0.025 * np.sin(2 * math.pi * r.uniform(1.6, 2.6) * x + ph)) + (x - 0.5) * ang * h
+
+        def paint(d, ss, crest=crest):
+            pts = [(0, h * ss)] + [(j * ss, crest[j] * ss) for j in range(0, w, 3)] + [(w * ss, crest[-1] * ss), (w * ss, h * ss)]
+            d.polygon(pts, fill=255)
+        m = _mask_fill(size, paint, 2)
+        sh = m.filter(ImageFilter.GaussianBlur(h * 0.016)).point(lambda v: int(v * 0.55))
+        sh_i = Image.new("RGBA", size, (0, 0, 0, 0))
+        sh_i.paste((0, 0, 0, 255), (0, -int(h * 0.012)), sh)
+        img = Image.alpha_composite(img, sh_i)
+        lay = Image.new("RGBA", size, (*_mix(cols[i % len(cols)], C["deep"], 0.15 + 0.35 * t), 0))
+        lay.putalpha(m)
+        img = Image.alpha_composite(img, lay)
+    return _finish(np.asarray(img.convert("RGB"), np.float32), rng, 3.0, 0.1)
+
+
+def art_stars(size, C, rng, r):
+    w, h = size
+    xx, yy = _coords(h, w)
+    img = _ramp(yy, [(0, _mix(C["deep"], (0, 0, 0), 0.4)), (1, C["base"])])
+    neb = _fbm(h, w, rng, 5, 2, 0.55)
+    neb2 = _fbm(h, w, rng, 4, 3, 0.5)
+    img = img + np.asarray(C["glow"], np.float32) * (np.clip(neb - 0.45, 0, 1) * 1.1)[..., None] * 0.7
+    img = img + np.asarray(C["accent"], np.float32) * (np.clip(neb2 - 0.55, 0, 1) * 1.2)[..., None] * 0.5
+    pic = _to_img(img)
+    d = ImageDraw.Draw(pic, "RGBA")
+    for _ in range(int(w * h / 4200)):
+        px, py = r.uniform(0, w), r.uniform(0, h)
+        s = r.choice([1.6, 2, 2, 2.6, 3.4])
+        d.ellipse((px, py, px + s, py + s), fill=(255, 255, 255, r.randint(140, 255)))
+    glint = Image.new("RGBA", size, (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glint)
+    for _ in range(r.randint(4, 8)):
+        px, py, L = r.uniform(0, w), r.uniform(0, h), r.uniform(0.012, 0.03) * w
+        gd.line((px - L, py, px + L, py), fill=(255, 255, 255, 200), width=1)
+        gd.line((px, py - L, px, py + L), fill=(255, 255, 255, 200), width=1)
+        gd.ellipse((px - 2, py - 2, px + 2, py + 2), fill=(255, 255, 255, 255))
+    pic = Image.alpha_composite(pic.convert("RGBA"), glint.filter(ImageFilter.GaussianBlur(0.6))).convert("RGB")
+    return _finish(np.asarray(pic, np.float32), rng, 2.0, 0.2)
+
+
+def art_halftone(size, C, rng, r):
+    w, h = size
+    xx, yy = _coords(h, w)
+    base = _blobs_field(h, w, rng, [C["mid"], C["glow"]], C["base"], 3, 0.7, 0.05, (0.3, 0.7))
+    pic = _to_img(base)
+    sp = max(14, int(w / r.randint(26, 40)))
+    ss = 3
+    m = Image.new("L", (w * ss // 1, h * ss // 1), 0)
+    d = ImageDraw.Draw(m)
+    ox, oy = r.uniform(0, 1), r.uniform(0, 1)
+    row = 0
+    for y in range(0, h + sp, int(sp * 0.866)):
+        for x in range(-sp, w + sp, sp):
+            px = x + (sp / 2 if row % 2 else 0)
+            t = _clamp(math.hypot((px / w - ox) * w / h, y / h - oy) * 1.25, 0, 1)
+            rad = sp * 0.5 * (1 - t) ** 1.2
+            if rad > 0.6:
+                d.ellipse(((px - rad) * ss, (y - rad) * ss, (px + rad) * ss, (y + rad) * ss), fill=255)
+        row += 1
+    m = m.resize((w, h), Image.Resampling.BOX)
+    pic.paste(tuple(C["light"] if not C["dark"] else C["glow"]), (0, 0), m.point(lambda v: int(v * 0.8)))
+    return _finish(np.asarray(pic, np.float32), rng, 2.5, 0.12)
+
+
+_ART = {"mesh_glow": art_mesh_glow, "aurora": art_aurora, "bokeh": art_bokeh, "waves": art_waves,
+        "landscape": art_landscape, "skyline": art_skyline, "topo": art_topo, "synth": art_synth,
+        "facets": art_facets, "rays": art_rays, "blobs": art_blobs, "papercut": art_papercut,
+        "stars": art_stars, "halftone": art_halftone}
+
+
+DARK_ONLY = {"aurora", "bokeh", "skyline", "synth", "stars", "topo"}
+
+
+def generate_art(style: str, size: tuple[int, int], pal, dark: bool = True, seed: int = 0) -> Image.Image:
+    dark = True if style in DARK_ONLY else dark
+    seed = int(seed) or random.randrange(1, 2 ** 31)
+    fn = _ART.get(style, art_mesh_glow)
+    return fn(size, art_colors(pal, dark), _np_rng(seed), random.Random(seed))
+
+
+# ---------------------------------------------------------------------------
+# Scrims, icons, decor kits ("add-ons")
+# ---------------------------------------------------------------------------
+
+def _smooth(t):
+    t = np.clip(t, 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def scrim_mask(size: tuple[int, int], side: str, strength: float = 0.8, start: float = 0.3, end: float = 1.0,
+               center: tuple[float, float] = (0.5, 0.5)) -> np.ndarray:
+    """Alpha field 0..1 used to darken / lighten an art image where text will sit.
+    bottom/top/left/right: 0 at `start`, 1 at `end` measured from the opposite edge; radial: spot around `center`."""
+    w, h = size
+    xx, yy = _coords(h, w)
+    if side == "radial":
+        d = np.sqrt(((xx - center[0]) * w / h) ** 2 + (yy - center[1]) ** 2)
+        t = 1 - (d - start) / max(1e-6, end - start)
+    elif side == "flat":
+        t = np.ones_like(xx)
+    else:
+        coord = {"bottom": yy, "top": 1 - yy, "left": 1 - xx, "right": xx}.get(side, yy)
+        t = (coord - start) / max(1e-6, end - start)
+    return (_smooth(t) * strength).astype(np.float32)
+
+
+def apply_scrim(img: Image.Image, color: RGB, side: str, strength: float = 0.8, start: float = 0.3, end: float = 1.0,
+                center: tuple[float, float] = (0.5, 0.5)) -> Image.Image:
+    a = scrim_mask(img.size, side, strength, start, end, center)[..., None]
+    arr = np.asarray(img.convert("RGB"), np.float32)
+    out = arr * (1 - a) + np.asarray(color, np.float32) * a
+    return _to_img(out)
+
+
+def _icon_canvas(S: int):
+    ss = 4
+    im = Image.new("RGBA", (S * ss, S * ss), (0, 0, 0, 0))
+    k = S * ss / 100.0
+    return im, ImageDraw.Draw(im), k, ss
+
+
+def _pts(k, pts):
+    return [(x * k, y * k) for x, y in pts]
+
+
+def _glyph_shield(d, k, fg, ac):
+    d.polygon(_pts(k, [(50, 8), (86, 21), (86, 48), (78, 70), (50, 92), (22, 70), (14, 48), (14, 21)]), fill=fg)
+    d.line(_pts(k, [(33, 49), (45, 62), (68, 36)]), fill=ac, width=int(9 * k), joint="curve")
+
+
+def _glyph_heart(d, k, fg, ac):
+    d.ellipse((15 * k, 18 * k, 55 * k, 58 * k), fill=fg)
+    d.ellipse((45 * k, 18 * k, 85 * k, 58 * k), fill=fg)
+    d.polygon(_pts(k, [(17, 46), (83, 46), (50, 88)]), fill=fg)
+    d.line(_pts(k, [(30, 34), (36, 28)]), fill=ac, width=int(5 * k))
+
+
+def _glyph_house(d, k, fg, ac):
+    d.polygon(_pts(k, [(50, 12), (92, 50), (8, 50)]), fill=fg)
+    d.rectangle((20 * k, 48 * k, 80 * k, 88 * k), fill=fg)
+    d.rectangle((42 * k, 62 * k, 58 * k, 88 * k), fill=ac)
+    d.rectangle((68 * k, 16 * k, 78 * k, 38 * k), fill=fg)
+
+
+def _glyph_chart(d, k, fg, ac):
+    for x0, y0 in ((14, 60), (42, 42), (70, 24)):
+        d.rounded_rectangle((x0 * k, y0 * k, (x0 + 16) * k, 88 * k), radius=3 * k, fill=fg)
+    d.line(_pts(k, [(12, 46), (38, 28), (54, 36), (82, 10)]), fill=ac, width=int(6 * k), joint="curve")
+    d.polygon(_pts(k, [(90, 4), (70, 8), (86, 24)]), fill=ac)
+
+
+def _glyph_umbrella(d, k, fg, ac):
+    d.pieslice((6 * k, 12 * k, 94 * k, 100 * k), 180, 360, fill=fg)
+    for cx in (28, 50, 72):
+        d.ellipse(((cx - 11) * k, 46 * k, (cx + 11) * k, 64 * k), fill=(0, 0, 0, 0))
+    d.line(_pts(k, [(50, 50), (50, 80)]), fill=ac, width=int(6 * k))
+    d.arc((50 * k, 70 * k, 72 * k, 92 * k), 0, 180, fill=ac, width=int(6 * k))
+
+
+def _glyph_bulb(d, k, fg, ac):
+    d.ellipse((24 * k, 10 * k, 76 * k, 62 * k), fill=fg)
+    d.polygon(_pts(k, [(36, 54), (64, 54), (58, 72), (42, 72)]), fill=fg)
+    d.rounded_rectangle((40 * k, 74 * k, 60 * k, 82 * k), radius=3 * k, fill=ac)
+    d.rounded_rectangle((43 * k, 84 * k, 57 * k, 91 * k), radius=3 * k, fill=ac)
+    d.line(_pts(k, [(42, 42), (50, 52), (58, 42)]), fill=ac, width=int(4 * k), joint="curve")
+
+
+def _glyph_leaf(d, k, fg, ac):
+    top, bot = [], []
+    for i in range(0, 41):
+        t = i / 40
+        x = 18 + 66 * t
+        y = 82 - 66 * t
+        off = 30 * math.sin(math.pi * t)
+        top.append((x - off * 0.7, y - off * 0.7))
+        bot.append((x + off * 0.7, y + off * 0.7))
+    d.polygon(_pts(k, top + bot[::-1]), fill=fg)
+    d.line(_pts(k, [(18, 86), (62, 36)]), fill=ac, width=int(5 * k))
+
+
+def _glyph_family(d, k, fg, ac):
+    for cx in (32, 68):
+        d.ellipse(((cx - 11) * k, 12 * k, (cx + 11) * k, 34 * k), fill=fg)
+        d.rounded_rectangle(((cx - 16) * k, 38 * k, (cx + 16) * k, 86 * k), radius=12 * k, fill=fg)
+    d.ellipse((42 * k, 46 * k, 58 * k, 62 * k), fill=ac)
+    d.rounded_rectangle((38 * k, 64 * k, 62 * k, 90 * k), radius=9 * k, fill=ac)
+
+
+def _glyph_rocket(d, k, fg, ac):
+    d.polygon(_pts(k, [(50, 6), (66, 28), (66, 68), (34, 68), (34, 28)]), fill=fg)
+    d.polygon(_pts(k, [(34, 48), (16, 72), (34, 68)]), fill=fg)
+    d.polygon(_pts(k, [(66, 48), (84, 72), (66, 68)]), fill=fg)
+    d.ellipse((42 * k, 28 * k, 58 * k, 44 * k), fill=ac)
+    d.polygon(_pts(k, [(42, 72), (58, 72), (50, 94)]), fill=ac)
+
+
+def _glyph_clock(d, k, fg, ac):
+    d.ellipse((10 * k, 10 * k, 90 * k, 90 * k), outline=fg, width=int(9 * k))
+    d.line(_pts(k, [(50, 50), (50, 26)]), fill=ac, width=int(7 * k))
+    d.line(_pts(k, [(50, 50), (68, 60)]), fill=ac, width=int(7 * k))
+    d.ellipse((45 * k, 45 * k, 55 * k, 55 * k), fill=fg)
+
+
+def _glyph_lock(d, k, fg, ac):
+    d.arc((29 * k, 10 * k, 71 * k, 62 * k), 180, 360, fill=fg, width=int(9 * k))
+    d.line(_pts(k, [(33, 38), (33, 50)]), fill=fg, width=int(9 * k))
+    d.line(_pts(k, [(67, 38), (67, 50)]), fill=fg, width=int(9 * k))
+    d.rounded_rectangle((20 * k, 44 * k, 80 * k, 90 * k), radius=8 * k, fill=fg)
+    d.ellipse((43 * k, 58 * k, 57 * k, 72 * k), fill=ac)
+    d.rectangle((47 * k, 66 * k, 53 * k, 80 * k), fill=ac)
+
+
+def _glyph_target(d, k, fg, ac):
+    d.ellipse((8 * k, 8 * k, 92 * k, 92 * k), fill=fg)
+    d.ellipse((24 * k, 24 * k, 76 * k, 76 * k), fill=(0, 0, 0, 0))
+    d.ellipse((30 * k, 30 * k, 70 * k, 70 * k), fill=fg)
+    d.ellipse((42 * k, 42 * k, 58 * k, 58 * k), fill=ac)
+
+
+def _glyph_coins(d, k, fg, ac):
+    for i, y in enumerate((62, 44, 26)):
+        d.rectangle((16 * k, (y + 8) * k, 84 * k, (y + 20) * k), fill=fg)
+        d.ellipse((16 * k, (y + 14) * k, 84 * k, (y + 28) * k), fill=fg)
+        d.ellipse((16 * k, y * k, 84 * k, (y + 16) * k), fill=ac if i == 2 else fg, outline=ac, width=int(2.5 * k))
+
+
+def _glyph_star(d, k, fg, ac):
+    pts = []
+    for i in range(10):
+        r = 44 if i % 2 == 0 else 19
+        a = -math.pi / 2 + i * math.pi / 5
+        pts.append((50 + r * math.cos(a), 52 + r * math.sin(a)))
+    d.polygon(_pts(k, pts), fill=fg)
+
+
+def _glyph_check(d, k, fg, ac):
+    d.ellipse((8 * k, 8 * k, 92 * k, 92 * k), fill=fg)
+    d.line(_pts(k, [(28, 52), (44, 68), (74, 34)]), fill=ac, width=int(10 * k), joint="curve")
+
+
+ICON_GLYPHS = {"shield": _glyph_shield, "heart": _glyph_heart, "house": _glyph_house, "chart": _glyph_chart,
+               "umbrella": _glyph_umbrella, "bulb": _glyph_bulb, "leaf": _glyph_leaf, "family": _glyph_family,
+               "rocket": _glyph_rocket, "clock": _glyph_clock, "lock": _glyph_lock, "target": _glyph_target,
+               "coins": _glyph_coins, "star": _glyph_star, "check": _glyph_check}
+
+
+def icon_glyph(name: str, size: int, fg: RGB, ac: RGB) -> Image.Image:
+    im, d, k, ss = _icon_canvas(size)
+    ICON_GLYPHS.get(name, _glyph_star)(d, k, (*fg, 255), (*ac, 255))
+    return im.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def icon_medallion(name: str, size: int, bg_a: RGB, bg_b: RGB, fg: RGB, ac: RGB, ring: RGB | None = None,
+                   shape: str = "circle") -> Image.Image:
+    """Topic icon on a gradient disc / rounded tile with a thin ring: a ready-made 'add-on' picture."""
+    ss = 3
+    S = size * ss
+    mask = Image.new("L", (S, S), 0)
+    md = ImageDraw.Draw(mask)
+    if shape == "circle":
+        md.ellipse((0, 0, S - 1, S - 1), fill=255)
+    else:
+        md.rounded_rectangle((0, 0, S - 1, S - 1), radius=int(S * 0.26), fill=255)
+    mask = mask.resize((size, size), Image.Resampling.LANCZOS)
+    yy = np.linspace(0, 1, size, dtype=np.float32)[:, None, None]
+    xx = np.linspace(0, 1, size, dtype=np.float32)[None, :, None]
+    t = (xx * 0.5 + yy * 0.5)
+    arr = np.asarray(bg_a, np.float32) * (1 - t) + np.asarray(bg_b, np.float32) * t
+    out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGB").convert("RGBA")
+    out.putalpha(mask)
+    if ring is not None:
+        rm = Image.new("L", (S, S), 0)
+        rd = ImageDraw.Draw(rm)
+        wd = max(2, int(S * 0.018))
+        inset = int(S * 0.055)
+        if shape == "circle":
+            rd.ellipse((inset, inset, S - 1 - inset, S - 1 - inset), outline=255, width=wd)
+        else:
+            rd.rounded_rectangle((inset, inset, S - 1 - inset, S - 1 - inset), radius=int(S * 0.21), outline=255, width=wd)
+        rm = rm.resize((size, size), Image.Resampling.LANCZOS).point(lambda v: int(v * 0.6))
+        out.paste((*ring, 255), (0, 0), rm)
+    g = icon_glyph(name, int(size * 0.56), fg, ac)
+    off = (size - g.width) // 2
+    out.alpha_composite(g, (off, off))
+    return out
+
+
+def decor_image(kind: str, w: int, h: int, color: RGB, alpha: float = 0.5, seed: int = 0) -> Image.Image:
+    """Small RGBA add-on graphics: dots, plus signs, rings, waves, sparkles, stripes, brackets, swoosh."""
+    r = random.Random(seed or 1)
+    ss = 3
+    W, H = w * ss, h * ss
+    m = Image.new("L", (W, H), 0)
+    d = ImageDraw.Draw(m)
+    u = min(W, H)
+    if kind == "dots":
+        n = 6
+        sp = min(W, H) / n if W >= H else min(W, H) / n
+        cols, rows = max(2, int(W / sp)), max(2, int(H / sp))
+        rad = sp * 0.17
+        for i in range(cols):
+            for j in range(rows):
+                cx, cy = (i + 0.5) * W / cols, (j + 0.5) * H / rows
+                d.ellipse((cx - rad, cy - rad, cx + rad, cy + rad), fill=255)
+    elif kind == "plus":
+        cols, rows = max(2, int(W / (u / 4))), max(2, int(H / (u / 4)))
+        L = u / 4 * 0.2
+        for i in range(cols):
+            for j in range(rows):
+                cx, cy = (i + 0.5) * W / cols, (j + 0.5) * H / rows
+                d.line((cx - L, cy, cx + L, cy), fill=255, width=max(2, int(L * 0.28)))
+                d.line((cx, cy - L, cx, cy + L), fill=255, width=max(2, int(L * 0.28)))
+    elif kind == "rings":
+        for i in range(4):
+            rr = (i + 1) / 4 * 0.98
+            d.ellipse((W / 2 - rr * W / 2, H / 2 - rr * H / 2, W / 2 + rr * W / 2, H / 2 + rr * H / 2), outline=255, width=max(2, int(u * 0.012)))
+    elif kind == "wave":
+        amp = H * 0.25
+        pts = [(x, H / 2 + amp * math.sin(x / W * 2 * math.pi * 3)) for x in range(0, W, 4)]
+        d.line(pts, fill=255, width=max(3, int(H * 0.09)), joint="curve")
+    elif kind == "sparkle":
+        pts = []
+        for i in range(64):
+            a = 2 * math.pi * i / 64
+            rr = (0.5 * abs(math.cos(a)) ** 3 + 0.5 * abs(math.sin(a)) ** 3) ** 1.0
+            rr = 1.0 / (1 + 7 * (abs(math.sin(2 * a)) ** 0.7)) ** 0.5 * 1.0
+            pts.append((W / 2 + math.cos(a) * rr * W / 2, H / 2 + math.sin(a) * rr * H / 2))
+        d.polygon(pts, fill=255)
+    elif kind == "stripes":
+        step = max(10, int(u * 0.09))
+        for x in range(-H, W + H, step):
+            d.line((x, H, x + H, 0), fill=255, width=max(2, step // 4))
+    elif kind == "brackets":
+        L, t = u * 0.28, max(3, int(u * 0.04))
+        d.line((0, L, 0, 0, L, 0), fill=255, width=t, joint="curve")
+        d.line((W - L, H, W, H, W, H - L), fill=255, width=t, joint="curve")
+    elif kind == "swoosh":
+        top, bot = [], []
+        for i in range(0, 121):
+            t = i / 120
+            cx = W * (0.03 + 0.94 * t)
+            cy = H * (0.62 - 0.35 * math.sin(t * math.pi * 0.9) + 0.1 * t)
+            half = H * (0.05 + 0.09 * math.sin(t * math.pi) ** 0.8)
+            top.append((cx, cy - half))
+            bot.append((cx, cy + half))
+        d.polygon(top + bot[::-1], fill=255)
+    elif kind == "diamonds":
+        n = 4
+        for i in range(n):
+            cx = (i + 0.5) * W / n
+            rr = u * 0.12
+            d.polygon([(cx, H / 2 - rr), (cx + rr, H / 2), (cx, H / 2 + rr), (cx - rr, H / 2)], fill=255)
+    m = m.resize((w, h), Image.Resampling.LANCZOS)
+    out = Image.new("RGBA", (w, h), (*color, 0))
+    out.putalpha(m.point(lambda v: int(v * _clamp(alpha, 0, 1))))
+    return out
+
+
+DECOR_KINDS = ["dots", "plus", "rings", "wave", "sparkle", "stripes", "brackets", "swoosh", "diamonds"]
+
+
+def scrim_image(side: str, color: RGB, strength: float = 0.8, start: float = 0.3, end: float = 1.0,
+                center: tuple[float, float] = (0.5, 0.5), aspect: float = 1.0, box: Box | None = None,
+                feather: float = 0.0, long_side: int = 360) -> Image.Image:
+    """Small RGBA image (colour + alpha gradient). Used as a stretchable picture layer, so it stays tiny and editable."""
+    w = long_side if aspect >= 1 else max(8, int(long_side * aspect))
+    h = max(8, int(w / aspect)) if aspect >= 1 else long_side
+    if box is not None:                 # soft rectangle (local darkening behind a block of text)
+        xx, yy = _coords(h, w)
+        f = max(0.001, feather)
+        m = _smooth((xx - box[0]) / f) * _smooth((box[2] - xx) / f) * _smooth((yy - box[1]) / f) * _smooth((box[3] - yy) / f)
+        a = (m * strength).astype(np.float32)
+    else:
+        a = scrim_mask((w, h), side, strength, start, end, center)
+    out = Image.new("RGBA", (w, h), (*color, 0))
+    out.putalpha(Image.fromarray((np.clip(a, 0, 1) * 255).astype(np.uint8), "L"))
+    return out
+
+
+def ghost_number(text: str, height: int, color: RGB, alpha: float = 0.28, outline: bool = True) -> Image.Image:
+    """Large outlined numeral used as a quiet typographic add-on behind slide content."""
+    path = _resolve_weight("display", True, False)
+    f = _load_ttf(path, height, "bold")
+    ss = 2
+    bbox = f.getbbox(text)
+    w, h = int(bbox[2] - bbox[0]) + 40, int(bbox[3] - bbox[1]) + 40
+    m = Image.new("L", (w * ss, h * ss), 0)
+    d = ImageDraw.Draw(m)
+    f2 = _load_ttf(path, height * ss, "bold")
+    if outline:
+        d.text((20 * ss - bbox[0] * ss, 20 * ss - bbox[1] * ss), text, font=f2, fill=0, stroke_width=max(2, height // 40 * ss), stroke_fill=255)
+        d.text((20 * ss - bbox[0] * ss, 20 * ss - bbox[1] * ss), text, font=f2, fill=0)
+    else:
+        d.text((20 * ss - bbox[0] * ss, 20 * ss - bbox[1] * ss), text, font=f2, fill=255)
+    m = m.resize((w, h), Image.Resampling.LANCZOS)
+    out = Image.new("RGBA", (w, h), (*color, 0))
+    out.putalpha(m.point(lambda v: int(v * _clamp(alpha, 0, 1))))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
 
@@ -546,6 +1396,9 @@ class TextStyle:
     shadow_dx: float = 4.0
     shadow_dy: float = 4.0
     shadow_opacity: float = 0.5
+    # --- v3: 'button' look for highlighted text (defaults reproduce the old square highlight) ---
+    highlight_pad: float = 6.0          # horizontal padding in px (vertical follows)
+    highlight_radius: float = 0.0       # 0 = square corners, 0.5 = full pill
 
 
 @dataclass
@@ -666,6 +1519,22 @@ class ContactInfo:
 
 
 @dataclass
+class Motion:
+    """How one slide animates in a reel. Every field defaults to "auto" = chosen from the slide's own design."""
+    mode: str = "auto"                  # auto | none  (none = the slide stays still)
+    mood: str = ""                      # optional hint from the designer: energetic | celebrate | elegant | calm | techy | playful
+    camera: str = "auto"                # auto | zoom_in | zoom_out | pan_left | pan_right | none
+    transition: str = "auto"            # transition INTO the next slide
+    headline: str = "auto"              # entrance of headline / big text
+    body: str = "auto"                  # entrance of body / caption text
+    cta: str = "auto"                   # entrance of badge / call-to-action
+    shapes: str = "auto"                # float | drift | pulse | spin | none
+    ambient: str = "auto"               # none | bokeh | sparkle | rise | dust | confetti | sweep
+    emphasis: str = "auto"              # call-to-action emphasis: pulse | none
+    pace: float = 1.0
+
+
+@dataclass
 class PostSpec:
     name: str = ""
     category: str = "Protection"
@@ -687,6 +1556,7 @@ class PostSpec:
     sel_text: str = ""
     sel_shape: str = ""
     sel_pic: str = ""
+    motion: Motion = field(default_factory=Motion)      # v3: reel animation plan ("auto" = chosen from the design)
 
     def get_palette(self) -> Palette:
         if self.theme == "custom" and self.custom_palette:
@@ -985,6 +1855,12 @@ def _paint_spotlight(c: Canvas, p: Palette) -> Geometry:
     return _geo((0.10, 0.22, 0.90, 0.78), p.card, p, 0.92, (0.43, 0.04))
 
 
+def _paint_ai_canvas(c: Canvas, p: Palette) -> Geometry:
+    """Free canvas: just the background. The AI design director composes everything else from layers."""
+    c.fill_bg()
+    return _geo((0.08, 0.14, 0.92, 0.80), p.bg, p, 0.925, (0.055, 0.04), contact_on=p.on_bg)
+
+
 def _paint_blocks(c: Canvas, p: Palette) -> Geometry:
     c.fill_bg()
     c.rect((0, 0, c.fx(0.78), c.fy(0.72)), p.card)
@@ -1001,7 +1877,7 @@ _PAINTERS: dict[str, Callable[[Canvas, Palette], Geometry]] = {
     "split_diagonal": _paint_split_diagonal, "floating_card": _paint_floating_card,
     "stripes": _paint_stripes, "wave": _paint_wave, "dots": _paint_dots, "burst": _paint_burst,
     "polaroid": _paint_polaroid, "cut_corner": _paint_cut_corner, "spotlight": _paint_spotlight,
-    "blocks": _paint_blocks,
+    "blocks": _paint_blocks, "ai_canvas": _paint_ai_canvas,
 }
 _PHOTO_TEMPLATES = {"card_photo", "photo_side", "polaroid"}
 
@@ -1025,6 +1901,7 @@ TEMPLATE_LABELS = {
     "cut_corner": "Cut Corner - angled corner card",
     "spotlight": "Spotlight - soft glow focus",
     "blocks": "Colour Blocks - bold mosaic panels",
+    "ai_canvas": "Free Canvas - blank canvas used by AI-composed designs",
 }
 
 
@@ -1100,6 +1977,29 @@ def measure_text_layer(layer: TextLayer, cw: int, ch: int) -> float:
     return len(lines) * line_h
 
 
+def _draw_highlight(tile: Image.Image, box: tuple[float, float, float, float], st: TextStyle, u: float) -> None:
+    """Paints the background behind one text line (square highlight or rounded 'button')."""
+    lx, y, wl, size_px = box
+    pad = st.highlight_pad * u
+    x0, y0, x1, y1 = lx - pad, y - pad / 3, lx + wl + pad, y + size_px + pad * 2 / 3
+    if st.highlight_radius <= 0:
+        ImageDraw.Draw(tile).rectangle((x0, y0, x1, y1), fill=(*st.highlight_color, 255))
+        return
+    bw, bh = int(x1 - x0) + 3, int(y1 - y0) + 3
+    ss = 3
+    m = Image.new("L", (bw * ss, bh * ss), 0)
+    ImageDraw.Draw(m).rounded_rectangle((ss, ss, (bw - 2) * ss, (bh - 2) * ss),
+                                        radius=_clamp(st.highlight_radius, 0, 0.5) * (bh - 3) * ss, fill=255)
+    m = m.resize((bw, bh), Image.Resampling.BOX)
+    layer = Image.new("RGBA", (bw, bh), (*st.highlight_color, 0))
+    layer.putalpha(m)
+    ox, oy = int(x0) - 1, int(y0) - 1
+    cx0, cy0 = max(0, -ox), max(0, -oy)
+    cx1, cy1 = min(bw, tile.width - ox), min(bh, tile.height - oy)
+    if cx1 > cx0 and cy1 > cy0:
+        tile.alpha_composite(layer.crop((cx0, cy0, cx1, cy1)), (ox + cx0, oy + cy0))
+
+
 def draw_text_layer(c: Canvas, layer: TextLayer, geo: Geometry | None = None) -> None:
     if not layer.visible or not layer.text.strip():
         return
@@ -1110,7 +2010,7 @@ def draw_text_layer(c: Canvas, layer: TextLayer, geo: Geometry | None = None) ->
     color = _role_color(st, geo, c.pal)
     stroke_px = int(c.s(st.stroke_width))
     glow = (st.shadow_blur * 3 + abs(st.shadow_dx) + abs(st.shadow_dy)) * c.u if st.shadow else 0
-    pad = int(size_px * 0.5 + glow + stroke_px * 2) + 6
+    pad = int(size_px * 0.5 + glow + stroke_px * 2 + (st.highlight_pad * c.u if st.highlight else 0)) + 6
     tile_w, tile_h = int(max_w + 2 * pad), int(len(lines) * line_h + 2 * pad + size_px * 0.3)
 
     def line_x(line: str) -> float:
@@ -1129,7 +2029,7 @@ def draw_text_layer(c: Canvas, layer: TextLayer, geo: Geometry | None = None) ->
             lx = line_x(line)
             wl = tw(line)
             if extras and st.highlight and line:
-                d.rectangle((lx - 6 * c.u, y - 2 * c.u, lx + wl + 6 * c.u, y + size_px + 4 * c.u), fill=(*st.highlight_color, 255))
+                _draw_highlight(tile, (lx, y, wl, size_px), st, c.u)
             if line:
                 if sp:
                     x = lx
@@ -1481,38 +2381,9 @@ def auto_layout(spec: PostSpec, gap: float = 0.022, fit: bool = True) -> None:
 def render(spec: PostSpec, scale: float | None = None, guides: bool = False,
            page: tuple[int, int] | None = None, indicator: str = "none", swipe: bool = False,
            include_text: bool = True) -> Image.Image:
-    base_w, base_h = FORMATS.get(spec.fmt, FORMATS["square"])
-    s = spec.scale if scale is None else scale
-    size = (max(64, int(base_w * s)), max(64, int(base_h * s)))
-    pal = spec.get_palette()
-    c = Canvas(size, pal)
-
-    bg = spec.background
-    use_full = bg.image is not None and (bg.placement == "full" or (bg.placement == "auto" and spec.template not in _PHOTO_TEMPLATES))
-    if spec.gradient.enabled:
-        c.img.paste(make_gradient(size, spec.gradient.color_a, spec.gradient.color_b, spec.gradient.angle, spec.gradient.kind))
-        c.bg_locked = True
-    if use_full:
-        _paint_full_background(c, bg)
-        c.bg_locked = True
-
-    geo = _PAINTERS.get(spec.template, _paint_offset_card)(c, pal)
-
-    if bg.image is not None and not use_full:
-        box = bg.box if bg.placement == "custom" else (geo.photo_box or bg.box)
-        _draw_picture(c, bg, _box_px(c, box))
-    for pic in spec.pictures:
-        _draw_picture(c, pic, _box_px(c, pic.box))
-    for sh in spec.shapes:
-        draw_shape(c, sh)
-    if include_text:
-        for tl in spec.text_layers:
-            draw_text_layer(c, tl, geo)
-        _draw_contact(c, spec, geo)
-    _draw_logo(c, spec, geo)
+    c, _geo_ = _raw_render(spec, scale, include_text=include_text)
     if page:
         _draw_indicator(c, page, indicator, swipe)
-
     out = apply_effects(c.result(), spec.effects)
     return _draw_guides(out, spec.fmt) if guides else out
 
@@ -1697,18 +2568,586 @@ def _transition(a: Image.Image, b: Image.Image, p: float, kind: str) -> Image.Im
     return Image.blend(a, b, p)  # crossfade
 
 
-TRANSITIONS = ["crossfade", "slide_left", "slide_up", "wipe", "zoom", "none"]
-KENBURNS = ["zoom_in", "zoom_out", "pan_left", "pan_right", "none"]
+TRANSITIONS = ["auto", "crossfade", "slide_left", "slide_up", "wipe", "zoom", "none"]
+KENBURNS = ["auto", "zoom_in", "zoom_out", "pan_left", "pan_right", "none"]
+
+
+# ---------------------------------------------------------------------------
+# Smart motion: per-post animation planning + layered reel renderer
+# ---------------------------------------------------------------------------
+
+ENTRANCES = ["fade", "rise", "drop", "slide_left", "slide_right", "pop", "zoom", "wipe", "none"]
+SHAPE_MOTIONS = ["float", "drift", "pulse", "spin", "none"]
+AMBIENTS = ["none", "bokeh", "sparkle", "rise", "dust", "confetti", "sweep"]
+EMPHASES = ["pulse", "none"]
+
+# mood -> (headline entrances, body entrances, cta entrances, ambients, cameras, transitions, pace)
+_MOTION_TABLE: dict[str, tuple] = {
+    "energetic": (["pop", "slide_left", "zoom"], ["rise", "slide_left"], ["pop"], ["sparkle", "rise", "sweep"],
+                  ["zoom_in", "pan_left"], ["slide_left", "wipe", "zoom"], 1.15),
+    "celebrate": (["pop", "zoom"], ["rise"], ["pop"], ["confetti", "sparkle"],
+                  ["zoom_in", "zoom_out"], ["zoom", "slide_up", "crossfade"], 1.1),
+    "elegant": (["fade", "rise", "wipe"], ["fade"], ["fade", "rise"], ["dust", "sweep", "bokeh"],
+                ["zoom_in", "zoom_out"], ["crossfade", "wipe"], 0.85),
+    "calm": (["rise", "fade", "wipe"], ["fade", "rise"], ["rise", "pop"], ["bokeh", "dust"],
+             ["zoom_in", "pan_right", "pan_left"], ["crossfade", "slide_left"], 0.9),
+    "techy": (["wipe", "slide_left", "rise"], ["fade", "slide_left"], ["pop", "slide_left"], ["sparkle", "dust", "sweep"],
+              ["pan_left", "pan_right", "zoom_in"], ["wipe", "slide_left", "crossfade"], 1.0),
+    "playful": (["pop", "drop", "zoom"], ["rise"], ["pop"], ["confetti", "bokeh", "rise"],
+                ["zoom_in", "pan_left"], ["zoom", "slide_up", "wipe"], 1.1),
+}
+_ENERGY_WORDS = ("sale", "offer", "launch", "now", "free", "win", "discount", "limited", "deal", "new", "today", "hurry")
+_CELEBRATE_WORDS = ("congrat", "celebrat", "birthday", "anniversary", "winner", "party", "festival", "welcome", "thank")
+_TECH_WORDS = ("ai", "tech", "digital", "data", "cyber", "software", "app", "online", "code", "cloud")
+_ELEGANT_WORDS = ("luxury", "premium", "exclusive", "heritage", "wealth", "elegant", "legacy", "pension", "retire")
+
+
+def _seed_from(*parts) -> int:
+    return int(hashlib.md5("|".join(str(p) for p in parts).encode()).hexdigest()[:8], 16)
+
+
+def _slide_text(spec: PostSpec) -> str:
+    return " ".join(t.text for t in spec.text_layers if t.visible and t.text.strip()).lower()
+
+
+def infer_motion_mood(spec: PostSpec) -> str:
+    """Reads the post's words and palette to decide how lively its animation should be."""
+    if spec.motion and spec.motion.mood in _MOTION_TABLE:
+        return spec.motion.mood
+    txt = f" {_slide_text(spec)} "
+    words = set(re.findall(r"[a-z]+", txt))
+    if any(w in txt for w in _CELEBRATE_WORDS):
+        return "celebrate"
+    if txt.count("!") >= 1 or any(w in words for w in _ENERGY_WORDS):
+        return "energetic"
+    if any(w in words for w in _TECH_WORDS) or spec.theme in ("neon_cyber", "aurora", "retro_wave"):
+        return "techy"
+    head = next((t for t in spec.text_layers if t.kind == "headline"), None)
+    if (head and head.style.family in ("serif", "elegant_serif")) or any(w in txt for w in _ELEGANT_WORDS):
+        return "elegant"
+    if spec.theme in ("candy_pop", "sunset_glow", "mustard"):
+        return "playful"
+    return "calm"
+
+
+def plan_reel(slides: list[PostSpec], transition: str = "auto", camera: str = "auto", text_anim: str = "auto",
+              ambient: str = "auto", shapes: str = "auto") -> list[Motion]:
+    """Resolves every 'auto' into concrete choices - one Motion per slide, designed to look consistent
+    across the reel while still varying (camera / transition rotate, entrances follow each slide's mood)."""
+    n = len(slides)
+    mood0 = infer_motion_mood(slides[0])
+    table0 = _MOTION_TABLE[mood0]
+    rng0 = random.Random(_seed_from("reel", slides[0].id, n))
+    reel_ambient = rng0.choice(table0[3])
+    out: list[Motion] = []
+    prev_tr = ""
+    for i, s in enumerate(slides):
+        m = dataclasses.replace(s.motion) if s.motion else Motion()
+        mood = infer_motion_mood(s)
+        head_c, body_c, cta_c, amb_c, cam_c, tr_c, pace = _MOTION_TABLE[mood]
+        rng = random.Random(_seed_from(s.id, s.template, i))
+        if m.mode == "none":
+            out.append(Motion(mode="none", camera="none", transition="crossfade", headline="none", body="none", cta="none",
+                              shapes="none", ambient="none", emphasis="none"))
+            continue
+
+        def pick(override: str, own: str, choices: list[str]) -> str:
+            if override != "auto":
+                return override
+            return own if own != "auto" else rng.choice(choices)
+
+        m.headline = pick(text_anim, m.headline, head_c)
+        m.body = pick("auto" if text_anim == "auto" else ("fade" if text_anim in ("wipe", "pop", "zoom") else text_anim), m.body, body_c)
+        m.cta = pick("auto" if text_anim == "auto" else text_anim, m.cta, cta_c)
+        m.ambient = pick(ambient, m.ambient, [reel_ambient])
+        if m.ambient in ("confetti",) and mood not in ("celebrate", "playful") and ambient == "auto":
+            m.ambient = "sparkle"
+        cam_default = "zoom_in" if i == 0 else ("zoom_out" if i == n - 1 and n > 1 else cam_c[i % len(cam_c)])
+        m.camera = pick(camera, m.camera, [cam_default])
+        m.shapes = pick(shapes, m.shapes, ["float"])
+        if i < n - 1:
+            choices = [t for t in tr_c if t != prev_tr] or tr_c
+            m.transition = pick(transition, m.transition, choices)
+            prev_tr = m.transition
+        else:
+            m.transition = "none"
+        m.emphasis = m.emphasis if m.emphasis != "auto" else ("pulse" if mood in ("energetic", "celebrate", "playful", "techy") else "none")
+        m.pace = pace * (m.pace or 1.0)
+        out.append(m)
+    return out
+
+
+def _reading_seconds(spec: PostSpec) -> float:
+    words = len(_slide_text(spec).split())
+    return _clamp(2.6 + 0.30 * words, 3.0, 7.5)
+
+
+def _ease_out(t: float) -> float:
+    return 1 - (1 - _clamp(t, 0, 1)) ** 3
+
+
+def _back_out(t: float) -> float:
+    t = _clamp(t, 0, 1)
+    c1 = 1.70158
+    return 1 + (c1 + 1) * (t - 1) ** 3 + c1 * (t - 1) ** 2
+
+
+@dataclass
+class _Layer:
+    key: str
+    kind: str                           # picture | shape | headline | body | cta | text | contact | logo
+    tile: Image.Image
+    x: int
+    y: int
+    group: int = 1                      # 0 pictures/shapes, 1 text, 2 contact/logo
+    entrance: str = "fade"
+    motion: str = "none"                # continuous motion for decor
+    delay: float = 0.0
+    dur: float = 0.6
+    phase: float = 0.0
+    lines: int = 1
+    text_top: float = 0.0               # canvas y of the first text line (for line-wipe)
+    line_h: float = 0.0
+    emphasis: bool = False
+    rotated: bool = False
+
+
+def _matte(size: tuple[int, int], pal: Palette, draw_fn: Callable[[Canvas], None]) -> tuple[Image.Image, int, int] | None:
+    """Captures what draw_fn paints as a transparent RGBA tile (difference matting over black and white)."""
+    c = Canvas(size, pal)
+    shots = []
+    for bgc in ((0, 0, 0), (255, 255, 255)):
+        c.img.paste(bgc, (0, 0, size[0], size[1]))
+        draw_fn(c)
+        shots.append(np.asarray(c.img, np.float32))
+    b, w = shots
+    a = np.clip(1.0 - (w - b).mean(axis=2) / 255.0, 0.0, 1.0)
+    a8 = Image.fromarray((a * 255 + 0.5).astype(np.uint8), "L")
+    box = a8.point(lambda v: 255 if v > 2 else 0).getbbox()
+    if not box:
+        return None
+    x0, y0, x1, y1 = box
+    a_c, b_c = a[y0:y1, x0:x1], b[y0:y1, x0:x1]
+    col = np.where(a_c[..., None] > 0.004, b_c / np.maximum(a_c, 0.004)[..., None], 0.0)
+    rgba = np.dstack([np.clip(col, 0, 255), a_c * 255.0]).astype(np.uint8)
+    return Image.fromarray(rgba, "RGBA"), x0, y0
+
+
+def _raw_render(spec: PostSpec, scale: float | None, include_text: bool = True, include_shapes: bool = True,
+                include_logo: bool = True, include_pictures: bool = True) -> tuple[Canvas, Geometry]:
+    base_w, base_h = FORMATS.get(spec.fmt, FORMATS["square"])
+    s = spec.scale if scale is None else scale
+    size = (max(64, int(base_w * s)), max(64, int(base_h * s)))
+    pal = spec.get_palette()
+    c = Canvas(size, pal)
+    bg = spec.background
+    use_full = bg.image is not None and (bg.placement == "full" or (bg.placement == "auto" and spec.template not in _PHOTO_TEMPLATES))
+    if spec.gradient.enabled:
+        c.img.paste(make_gradient(size, spec.gradient.color_a, spec.gradient.color_b, spec.gradient.angle, spec.gradient.kind))
+        c.bg_locked = True
+    if use_full:
+        _paint_full_background(c, bg)
+        c.bg_locked = True
+    geo = _PAINTERS.get(spec.template, _paint_offset_card)(c, pal)
+    if bg.image is not None and not use_full:
+        box = bg.box if bg.placement == "custom" else (geo.photo_box or bg.box)
+        _draw_picture(c, bg, _box_px(c, box))
+    if include_pictures:
+        for pic in spec.pictures:
+            _draw_picture(c, pic, _box_px(c, pic.box))
+    if include_shapes:
+        for sh in spec.shapes:
+            draw_shape(c, sh)
+    if include_text:
+        for tl in spec.text_layers:
+            draw_text_layer(c, tl, geo)
+        _draw_contact(c, spec, geo)
+    if include_logo:
+        _draw_logo(c, spec, geo)
+    return c, geo
+
+
+def _fx_active(fx: Effects) -> bool:
+    return not (fx.look == "none" and fx.brightness == 1 and fx.contrast == 1 and fx.saturation == 1
+                and fx.vignette <= 0 and fx.grain <= 0 and fx.fade_bottom <= 0 and fx.fade_top <= 0)
+
+
+class _Ambient:
+    """Drifting particles / light sweeps that give a still design a sense of life."""
+
+    def __init__(self, kind: str, size: tuple[int, int], pal: Palette, seed: int):
+        self.kind, self.size = kind, size
+        w, h = size
+        r = random.Random(seed)
+        u = min(w, h)
+        cols = [pal.peek, pal.cta_bg, (255, 255, 255)]
+        self.items: list[dict] = []
+        if kind == "bokeh":
+            for _ in range(14):
+                rad = int(u * r.uniform(0.025, 0.075))
+                self.items.append(dict(x=r.random(), y=r.random(), v=r.uniform(0.012, 0.03), sway=r.uniform(0.01, 0.04),
+                                       ph=r.uniform(0, 6.28), a=r.uniform(0.10, 0.26), col=r.choice(cols),
+                                       spr=self._disc(max(6, rad), soft=0.35)))
+        elif kind == "sparkle":
+            for _ in range(18):
+                rad = int(u * r.uniform(0.014, 0.034))
+                self.items.append(dict(x=r.uniform(0.04, 0.96), y=r.uniform(0.04, 0.96), ph=r.uniform(0, 6.28), sp=r.uniform(0.5, 1.2),
+                                       col=r.choice([(255, 255, 255), pal.cta_bg, pal.peek]), spr=self._glint(max(8, rad))))
+        elif kind == "rise":
+            for _ in range(22):
+                rad = int(u * r.uniform(0.006, 0.018))
+                self.items.append(dict(x=r.random(), y=r.random(), v=r.uniform(0.04, 0.10), sway=r.uniform(0.01, 0.03),
+                                       ph=r.uniform(0, 6.28), a=r.uniform(0.25, 0.6), col=r.choice(cols),
+                                       spr=self._disc(max(3, rad), soft=0.5)))
+        elif kind == "dust":
+            for _ in range(40):
+                rad = int(u * r.uniform(0.002, 0.007))
+                self.items.append(dict(x=r.random(), y=r.random(), v=r.uniform(0.008, 0.02), sway=r.uniform(0.005, 0.02),
+                                       ph=r.uniform(0, 6.28), a=r.uniform(0.2, 0.55), col=(255, 255, 255),
+                                       spr=self._disc(max(2, rad), soft=0.6)))
+        elif kind == "confetti":
+            for _ in range(34):
+                self.items.append(dict(x=r.random(), y=r.random(), v=r.uniform(0.07, 0.15), sway=r.uniform(0.01, 0.04),
+                                       ph=r.uniform(0, 6.28), rot=r.uniform(90, 260), s=u * r.uniform(0.008, 0.017),
+                                       col=r.choice([pal.peek, pal.cta_bg, (255, 255, 255), _mix(pal.peek, (255, 255, 255), 0.4)])))
+        elif kind == "sweep":
+            bw = max(8, int(w * 0.20))
+            band = np.exp(-((np.linspace(-1, 1, bw)) ** 2) * 5.0)
+            arr = np.zeros((int(h * 1.5), bw, 4), np.uint8)
+            arr[..., :3] = 255
+            arr[..., 3] = (band[None, :] * 255 * 0.30).astype(np.uint8)
+            self.band = Image.fromarray(arr, "RGBA").rotate(-18, expand=True, resample=Image.Resampling.BICUBIC)
+
+    @staticmethod
+    def _disc(rad: int, soft: float) -> Image.Image:
+        d = rad * 2
+        yy, xx = np.mgrid[0:d, 0:d].astype(np.float32)
+        dist = np.sqrt((xx - rad + .5) ** 2 + (yy - rad + .5) ** 2) / rad
+        a = np.clip((1.0 - dist) / max(0.05, soft), 0, 1)
+        return Image.fromarray((a * 255).astype(np.uint8), "L")
+
+    @staticmethod
+    def _glint(rad: int) -> Image.Image:
+        d = rad * 2
+        yy, xx = np.mgrid[0:d, 0:d].astype(np.float32)
+        dx, dy = np.abs(xx - rad + .5) / rad, np.abs(yy - rad + .5) / rad
+        arms = np.exp(-np.minimum(dx, dy) * 14) * np.clip(1 - np.maximum(dx, dy), 0, 1)
+        core = np.exp(-(dx ** 2 + dy ** 2) * 18)
+        return Image.fromarray((np.clip(arms * 0.9 + core, 0, 1) * 255).astype(np.uint8), "L")
+
+    def draw(self, frame: Image.Image, t: float, front: bool = False) -> None:
+        w, h = self.size
+        k = self.kind
+        if k == "sweep":
+            if not front:
+                return
+            cyc = (t % 5.0) / 1.6
+            if cyc >= 1.0:
+                return
+            x = int(-self.band.width + (w + self.band.width * 2) * _ease_out(cyc) * 0.9 + w * 0.05)
+            frame.paste(self.band, (x, int(-h * 0.25)), self.band)
+            return
+        if (k == "sparkle") != front:
+            return
+        if k == "confetti":
+            ov = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+            d = ImageDraw.Draw(ov)
+            for it in self.items:
+                y = ((it["y"] + it["v"] * t) % 1.1) - 0.05
+                x = it["x"] + math.sin(it["ph"] + t * 1.6) * it["sway"]
+                a = math.radians(it["rot"] * t + it["ph"] * 30)
+                sx, sy = it["s"], it["s"] * 0.55 * (0.4 + abs(math.sin(a * 0.7)))
+                cx, cy = x * w, y * h
+                pts = [(cx + dx * math.cos(a) - dy * math.sin(a), cy + dx * math.sin(a) + dy * math.cos(a))
+                       for dx, dy in ((-sx, -sy), (sx, -sy), (sx, sy), (-sx, sy))]
+                d.polygon(pts, fill=(*it["col"], 215))
+            frame.paste(ov, (0, 0), ov)
+            return
+        for it in self.items:
+            spr = it["spr"]
+            if k == "sparkle":
+                tw = 0.5 + 0.5 * math.sin(it["ph"] + t * it["sp"] * 2.4)
+                a = max(0.0, tw) ** 2
+                px, py = it["x"] * w, it["y"] * h
+            else:
+                y = 1.08 - ((it["v"] * t + (1 - it["y"])) % 1.16) if k in ("rise", "bokeh") else ((it["y"] + it["v"] * t) % 1.1) - 0.05
+                x = it["x"] + math.sin(it["ph"] + t * 0.9) * it["sway"] + (it["v"] * t * 0.3 if k == "dust" else 0)
+                px, py = (x % 1.0) * w, y * h
+                edge = min(1.0, max(0.0, min(y + 0.04, 1.04 - y) * 8))
+                a = it["a"] * edge
+            if a <= 0.01:
+                continue
+            m = spr.point([int(v * a) for v in range(256)])
+            frame.paste(Image.new("RGB", spr.size, tuple(it["col"])), (int(px - spr.width / 2), int(py - spr.height / 2)), m)
+
+
+class _SlideRig:
+    """Everything needed to render one slide's animation: a static base plus separately animated layers."""
+
+    def __init__(self, spec: PostSpec, motion: Motion, size: tuple[int, int], out_scale: float, effects_on: bool = True):
+        self.spec, self.m, self.size = spec, motion, size
+        pal = spec.get_palette()
+        base_c, geo = _raw_render(spec, out_scale, include_text=False, include_shapes=False, include_logo=False, include_pictures=False)
+        self.base = base_c.result()
+        cw, ch = self.base.size
+        cs = (cw, ch)
+        layers: list[_Layer] = []
+        rng = random.Random(_seed_from(spec.id, "rig"))
+        fmt_area = cw * ch
+
+        def cap(key, kind, fn, group, **kw):
+            res = _matte(cs, pal, fn)
+            if res:
+                tile, x, y = res
+                layers.append(_Layer(key=key, kind=kind, tile=tile, x=x, y=y, group=group, phase=rng.uniform(0, 6.28), **kw))
+
+        for pic in spec.pictures:
+            if pic.image is None or not pic.visible:
+                continue
+            cap(f"pic:{pic.id}", "picture", lambda c, p=pic: _draw_picture(c, p, _box_px(c, p.box)), 0, rotated=bool(pic.rotation))
+            if layers and layers[-1].key == f"pic:{pic.id}":
+                layers[-1].kind = "picture:" + (pic.label or "").lower()
+        for sh in spec.shapes:
+            if sh.visible:
+                cap(f"shape:{sh.id}", "shape:" + sh.kind, lambda c, s=sh: draw_shape(c, s), 0, rotated=bool(sh.rotation))
+        texts = [t for t in spec.text_layers if t.visible and t.text.strip()]
+        texts.sort(key=lambda t: (t.y, t.x))
+        for tl in texts:
+            _f, lines, _tw, _sz, _mw, line_h, _sp = _prepare_text(tl, cw, ch, base_c.u)
+            kind = tl.kind if tl.kind in ("headline", "body", "cta") else ("cta" if tl.label.lower() in ("badge", "cta") else "text")
+            cap(f"text:{tl.id}", kind, lambda c, t=tl: draw_text_layer(c, t, geo), 1, lines=max(1, len(lines)),
+                text_top=base_c.fy(tl.y), line_h=line_h, rotated=bool(tl.style.rotation))
+        if spec.contact.enabled:
+            cap("contact", "contact", lambda c: _draw_contact(c, spec, geo), 2)
+        if spec.logo.visible:
+            cap("logo", "logo", lambda c: _draw_logo(c, spec, geo), 2)
+        self.layers = layers
+        self.fx = spec.effects if (effects_on and _fx_active(spec.effects)) else None
+        self.amb = _Ambient(motion.ambient, cs, pal, _seed_from(spec.id, "amb")) if motion.ambient not in ("none", "auto", "") else None
+        self._plan(cw, ch, rng)
+        self._flatten_static()
+
+    # -- planning ---------------------------------------------------------
+    def _plan(self, cw: int, ch: int, rng: random.Random) -> None:
+        m = self.m
+        pace = max(0.5, m.pace or 1.0)
+        enter = {"headline": m.headline, "body": m.body, "cta": m.cta, "text": m.body, "contact": "fade", "logo": "fade"}
+        t_text = 0.30 / pace
+        step = 0.32 / pace
+        shape_i = 0
+        for L in self.layers:
+            area = L.tile.width * L.tile.height / float(cw * ch)
+            if L.group == 0:
+                big = area > 0.22
+                tag = L.kind.split(":", 1)[-1]
+                is_icon = L.kind.startswith("picture") and "icon" in tag
+                is_decor = L.kind.startswith("picture") and ("decor" in tag or "add" in tag)
+                is_scrim = L.kind.startswith("picture") and ("scrim" in tag or area > 0.45)
+                if is_scrim or (L.kind.startswith("picture") and not (is_icon or is_decor)):
+                    L.entrance, L.motion = "none", "none"
+                    continue
+                if big:
+                    cx = (L.x + L.tile.width / 2) / cw
+                    L.entrance = "slide_left" if (L.tile.width / cw > 0.3 and cx < 0.4) else ("slide_right" if (L.tile.width / cw > 0.3 and cx > 0.6) else "fade")
+                    L.motion, L.delay, L.dur = "none", 0.05 + 0.06 * shape_i, 0.7 / pace
+                else:
+                    L.entrance = "pop" if (is_icon or rng.random() < 0.5) else "fade"
+                    L.delay, L.dur = 0.10 + 0.09 * shape_i, 0.55 / pace
+                    kind = L.kind.split(":", 1)[-1]
+                    auto = ("spin" if kind in ("star", "burst", "ring", "hexagon", "diamond") and not is_icon else
+                            "pulse" if kind == "ellipse" else "drift" if kind in ("pill", "arrow") else "float")
+                    L.motion = self.m.shapes if self.m.shapes not in ("auto", "") else auto
+                shape_i = min(shape_i + 1, 6)
+            elif L.group == 1:
+                e = enter.get(L.kind, "fade")
+                if e == "wipe" and (L.rotated or L.lines < 1):
+                    e = "fade"
+                L.entrance, L.delay, L.dur = e, t_text, (0.75 if e == "wipe" else 0.6) / pace
+                L.emphasis = L.kind == "cta" and m.emphasis == "pulse"
+                t_text += step * (0.8 if L.kind == "body" else 1.0)
+            else:
+                L.entrance = "fade"
+                L.delay, L.dur = (0.1, 0.6) if L.kind == "logo" else (t_text, 0.6)
+        if m.mode == "none":
+            for L in self.layers:
+                L.entrance, L.motion, L.emphasis = "none", "none", False
+
+    def _flatten_static(self) -> None:
+        """Layers that never move are baked into the base once, as long as nothing animated sits beneath them."""
+        base = self.base.convert("RGB")
+        keep: list[_Layer] = []
+        blocked = False
+        for L in self.layers:
+            animated = L.entrance != "none" or L.motion != "none" or L.emphasis
+            if not animated and not blocked:
+                base.paste(L.tile, (L.x, L.y), L.tile)
+            else:
+                blocked = blocked or animated
+                keep.append(L)
+        self.base, self.layers = base, keep
+
+    # -- rendering ----------------------------------------------------------
+    def _state(self, L: _Layer, t: float) -> tuple[float, float, float, float, float, float]:
+        """dx, dy (fractions), scale, alpha, rotation deg, wipe progress"""
+        dx = dy = rot = 0.0
+        sc = al = 1.0
+        wp = 1.0
+        if L.entrance != "none":
+            p = _clamp((t - L.delay) / max(0.05, L.dur), 0.0, 1.0)
+            e = _ease_out(p)
+            if L.entrance == "fade":
+                al = e
+            elif L.entrance == "rise":
+                dy, al = (1 - e) * 0.045, e
+            elif L.entrance == "drop":
+                dy, al = -(1 - e) * 0.045, e
+            elif L.entrance == "slide_left":
+                dx, al = -(1 - e) * 0.12, e
+            elif L.entrance == "slide_right":
+                dx, al = (1 - e) * 0.12, e
+            elif L.entrance == "pop":
+                sc, al = 0.55 + 0.45 * _back_out(p), min(1.0, p * 2.5)
+            elif L.entrance == "zoom":
+                sc, al = 1.22 - 0.22 * e, e
+            elif L.entrance == "wipe":
+                wp, dy, al = e, (1 - e) * 0.012, min(1.0, p * 4)
+            if p >= 1.0 and L.entrance == "wipe":
+                wp = 1.0
+        tt = t - (L.delay + L.dur if L.entrance != "none" else 0.0)
+        if L.motion != "none" and tt > -0.01:
+            ph = L.phase + max(0.0, t) * 0.9
+            if L.motion == "float":
+                dy += math.sin(ph) * 0.007
+            elif L.motion == "drift":
+                dx += math.sin(ph * 0.8) * 0.012
+                dy += math.sin(ph * 0.5) * 0.004
+            elif L.motion == "pulse":
+                sc *= 1 + 0.05 * math.sin(ph * 1.4)
+            elif L.motion == "spin":
+                rot = (max(0.0, t) * 22.0 + math.degrees(L.phase)) % 360
+        if L.emphasis and tt > 0.4:
+            sc *= 1 + 0.03 * max(0.0, math.sin((tt - 0.4) * 2 * math.pi * 0.8))
+        return dx, dy, sc, al, rot, wp
+
+    def _wipe(self, L: _Layer, wp: float) -> Image.Image:
+        w, h = L.tile.size
+        mask = np.zeros((h, w), np.float32)
+        n = max(1, L.lines)
+        soft = max(6.0, w * 0.06)
+        xs = np.arange(w, dtype=np.float32)[None, :]
+        for j in range(n):
+            lp = _clamp(wp * n - j, 0.0, 1.0)
+            y0 = int(L.text_top + j * L.line_h - L.y - L.line_h * 0.35)
+            y1 = int(L.text_top + (j + 1) * L.line_h - L.y + L.line_h * 0.2) if j < n - 1 else h
+            y0 = 0 if j == 0 else max(0, y0)
+            y0, y1 = max(0, min(h, y0)), max(0, min(h, y1))
+            if y1 <= y0:
+                continue
+            edge = lp * (w + soft)
+            mask[y0:y1, :] = np.clip((edge - xs) / soft, 0, 1)
+        a = np.asarray(L.tile.getchannel("A"), np.float32) * mask
+        out = L.tile.copy()
+        out.putalpha(Image.fromarray(a.astype(np.uint8), "L"))
+        return out
+
+    def frame(self, t: float, cam: float, cam_mag: float = 0.07) -> Image.Image:
+        fr = self.base.copy()
+        if self.amb:
+            self.amb.draw(fr, t, front=False)
+        for L in self.layers:
+            dx, dy, sc, al, rot, wp = self._state(L, t)
+            if al <= 0.004 or wp <= 0.0:
+                continue
+            tile = self._wipe(L, wp) if wp < 0.999 else L.tile
+            if abs(sc - 1) > 0.002:
+                tile = tile.resize((max(1, int(tile.width * sc)), max(1, int(tile.height * sc))), Image.Resampling.BILINEAR)
+            if rot:
+                tile = tile.rotate(-rot, expand=True, resample=Image.Resampling.BILINEAR)
+            if al < 0.996:
+                tile = tile.copy()
+                tile.putalpha(tile.getchannel("A").point([int(v * al) for v in range(256)]))
+            cx = L.x + L.tile.width / 2 + dx * self.base.width
+            cy = L.y + L.tile.height / 2 + dy * self.base.height
+            fr.paste(tile, (int(round(cx - tile.width / 2)), int(round(cy - tile.height / 2))), tile)
+        if self.amb:
+            self.amb.draw(fr, t, front=True)
+        if self.fx is not None:
+            fr = apply_effects(fr, self.fx)
+        mode = self.m.camera if self.m.camera not in ("auto", "") else "none"
+        fr = _kb(fr, cam, mode, cam_mag)
+        if fr.size != self.size:
+            fr = ImageOps.fit(fr, self.size, Image.Resampling.LANCZOS)
+        return fr
+
+
+def _iter_smart_frames(slides: list[PostSpec], duration: float, fps: int, transition: str, kenburns: str,
+                       out_scale: float, progress: Callable[[float], None] | None, text_anim: str, ambient: str,
+                       shapes: str = "auto") -> Iterator[Image.Image]:
+    n = len(slides)
+    duration, fps = max(1.0, float(duration)), max(1, int(fps))
+    bw, bh = FORMATS.get(slides[0].fmt, FORMATS["story"])
+    size = (_even(bw * out_scale), _even(bh * out_scale))
+    motions = plan_reel(slides, transition=transition, camera=kenburns, text_anim=text_anim, ambient=ambient, shapes=shapes)
+
+    fixed = sum(s.duration for s in slides if s.duration > 0)
+    autos = [i for i, s in enumerate(slides) if s.duration <= 0]
+    weights = {i: _reading_seconds(slides[i]) for i in autos}
+    room = max(0.5 * len(autos), duration - fixed)
+    wsum = sum(weights.values()) or 1.0
+    secs = [s.duration if s.duration > 0 else max(1.5, room * weights[i] / wsum) for i, s in enumerate(slides)]
+    counts = [max(3, int(round(x * fps))) for x in secs]
+    total = sum(counts)
+    tf = int(fps * 0.6) if n > 1 else 0
+    done = 0
+    nxt: _SlideRig | None = None
+    for i in range(n):
+        rig = nxt or _SlideRig(slides[i], motions[i], size, out_scale)
+        nxt = None
+        tkind = motions[i].transition if i < n - 1 else "none"
+        tr = min(tf, counts[i] // 3) if (i < n - 1 and tkind != "none") else 0
+        hold = counts[i] - tr
+        for k in range(hold):
+            yield rig.frame(k / fps, k / max(1, hold - 1))
+            done += 1
+        if tr:
+            nxt = _SlideRig(slides[i + 1], motions[i + 1], size, out_scale)
+            a = rig.frame(hold / fps, 1.0)
+            b = nxt.frame(0.0, 0.0)
+            for k in range(1, tr + 1):
+                yield _transition(a, b, _ease(k / (tr + 1)), tkind)
+                done += 1
+        if progress:
+            progress(min(1.0, done / max(1, total)))
+
+
+def preview_slide_motion(spec: PostSpec, seconds: float = 3.4, fps: int = 12, out_scale: float = 0.32,
+                         transition: str = "auto", camera: str = "auto", text_anim: str = "auto", ambient: str = "auto") -> bytes:
+    """Small animated GIF showing how ONE slide will animate in the reel (for a quick look in the studio)."""
+    one = _clone(spec)
+    frames = [f.copy() for f in _iter_smart_frames([one], seconds, fps, transition, camera, out_scale, None, text_anim, ambient)]
+    buf = io.BytesIO()
+    frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:], duration=int(1000 / fps), loop=0)
+    return buf.getvalue()
 
 
 def iter_reel_frames(slides: list[PostSpec], duration: float = 18.0, fps: int = 15, animate: bool = True,
                      transition: str = "crossfade", kenburns: str = "zoom_in", reveal_text: bool = False,
-                     out_scale: float = 1.0, progress: Callable[[float], None] | None = None) -> Iterator[Image.Image]:
-    """Yields reel frames one at a time (constant memory), so long reels never blow up RAM."""
+                     out_scale: float = 1.0, progress: Callable[[float], None] | None = None,
+                     text_anim: str = "auto", ambient: str = "auto", smart: bool | None = None) -> Iterator[Image.Image]:
+    """Yields reel frames one at a time (constant memory), so long reels never blow up RAM.
+
+    smart=True (or transition/kenburns == "auto") uses the layered smart-motion engine: each slide's text, shapes
+    and add-ons animate on their own according to the post's mood. smart=False is the classic whole-frame engine."""
     if not slides:
         raise ValueError("A reel needs at least one slide.")
+    use_smart = smart if smart is not None else (transition == "auto" or kenburns == "auto")
+    if use_smart and animate:
+        yield from _iter_smart_frames(slides, duration, fps, transition, kenburns, out_scale, progress, text_anim, ambient)
+        return
     if not animate:
         transition, kenburns, reveal_text = "none", "none", False
+    transition = "crossfade" if transition == "auto" else transition
+    kenburns = "zoom_in" if kenburns == "auto" else kenburns
     n = len(slides)
     duration, fps = max(1.0, float(duration)), max(1, int(fps))
     bw, bh = FORMATS.get(slides[0].fmt, FORMATS["story"])
@@ -1752,7 +3191,8 @@ def iter_reel_frames(slides: list[PostSpec], duration: float = 18.0, fps: int = 
 
 def export_reel_video(slides: list[PostSpec], duration: float = 18.0, fps: int = 15, animate: bool = True,
                       transition: str = "crossfade", kenburns: str = "zoom_in", reveal_text: bool = False,
-                      out_scale: float = 1.0, progress: Callable[[float], None] | None = None) -> tuple[bytes, str]:
+                      out_scale: float = 1.0, progress: Callable[[float], None] | None = None,
+                      text_anim: str = "auto", ambient: str = "auto", smart: bool | None = None) -> tuple[bytes, str]:
     """Renders slides into one reel. Returns (bytes, ext) where ext is "mp4" or "gif".
 
     Frames are streamed to the encoder. If MP4 encoding fails for any reason (no
@@ -1760,7 +3200,8 @@ def export_reel_video(slides: list[PostSpec], duration: float = 18.0, fps: int =
     so a broken video backend only lowers output quality - it never breaks the app."""
     if not slides:
         raise ValueError("export_reel_video needs at least one slide.")
-    kw = dict(duration=duration, fps=fps, animate=animate, transition=transition, kenburns=kenburns, reveal_text=reveal_text)
+    kw = dict(duration=duration, fps=fps, animate=animate, transition=transition, kenburns=kenburns, reveal_text=reveal_text,
+              text_anim=text_anim, ambient=ambient, smart=smart)
     if HAS_IMAGEIO:
         tmp = None
         try:
@@ -1805,7 +3246,7 @@ def font_preview(style: TextStyle, text: str = "Aa Sample text 123", height: int
 # ---------------------------------------------------------------------------
 
 _CLASSES = {cls.__name__: cls for cls in (Palette, TextStyle, TextLayer, ShapeLayer, ImageLayer, BackgroundLayer,
-                                          Gradient, Effects, ContactInfo, PostSpec, CarouselSpec)}
+                                          Gradient, Effects, ContactInfo, Motion, PostSpec, CarouselSpec)}
 
 
 def _encode_image(im: Image.Image) -> str:
@@ -2786,7 +4227,7 @@ def _ui_export(st, car, spec, K) -> None:
         dur = r1.slider("Total length (seconds)", 5, 60, 18, key="rl_dur", help="Slides with their own 'Reel seconds' keep that length.")
         fps = r2.select_slider("FPS", options=[12, 15, 24, 30], value=15, key="rl_fps")
         a1, a2 = st.columns(2)
-        trans = a1.selectbox("Transition", TRANSITIONS, key="rl_tr")
+        trans = a1.selectbox("Transition", TRANSITIONS, key="rl_tr", help="Auto = each slide picks its own transition and motion from its design.")
         kb = a2.selectbox("Camera motion", KENBURNS, key="rl_kb")
         b1, b2, b3 = st.columns(3)
         reveal = b1.checkbox("Text reveal", True, key="rl_rev", help="Slides start without text, then the text fades in.")
