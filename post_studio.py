@@ -1,6 +1,16 @@
 """
-post_studio.py  (v3 - AI art & smart motion edition)
-====================================================
+post_studio.py  (v4 - AI design edition)
+=========================================
+
+What's new in v4
+----------------
+  * Kerned letter-spacing: spaced caps (badges, labels) keep proper pair kerning ("MYTH" no longer reads "MY TH").
+  * Professional studio theme (typography, spacing, focus states, cards) and cleaner controls.
+  * Layout fixes: canvas-format and category selectors sit in their columns; carousel-only options are hidden for
+    single posts; export tabs adapt to single posts vs carousels.
+  * export_posts_zip() for batches of separate posts; TeX Gyre fonts from TeX Live are found automatically.
+  * Used by post_studio_ai.py v4 for AI copy, AI art direction and the multi-post gallery.
+
 
 A social-post, carousel and reel studio built on Pillow, NumPy, Streamlit and ImageIO.
 
@@ -92,7 +102,7 @@ __all__ = [
     "render_carousel", "export_reel_video", "iter_reel_frames", "auto_layout",
     "random_palette", "harmony_palette", "palette_from_image", "make_palette",
     "project_to_bytes", "project_from_bytes", "export_image", "export_carousel_zip",
-    "export_carousel_pdf", "missing_fonts",
+    "export_carousel_pdf", "export_posts_zip", "missing_fonts",
     "Motion", "plan_reel", "preview_slide_motion", "infer_motion_mood", "ENTRANCES", "AMBIENTS",
     "ART_STYLES", "generate_art", "art_colors", "apply_scrim", "scrim_image", "ghost_number", "DARK_ONLY", "icon_medallion", "icon_glyph", "ICON_GLYPHS",
     "decor_image", "DECOR_KINDS",
@@ -373,7 +383,8 @@ _FONT_STACKS: dict[tuple[str, str], Sequence[str]] = {
 _HERE = os.path.dirname(os.path.abspath(__file__))
 FONT_DIRS = (
     os.path.join(_HERE, "assets", "fonts"), os.path.join(_HERE, "fonts"),
-    "/usr/share/fonts", "/usr/local/share/fonts", "/Library/Fonts", "C:/Windows/Fonts",
+    "/usr/share/fonts", "/usr/local/share/fonts", "/usr/share/texmf/fonts", "/usr/share/texlive/texmf-dist/fonts/opentype",
+    "/Library/Fonts", os.path.expanduser("~/Library/Fonts"), "C:/Windows/Fonts",
 )
 
 
@@ -2032,10 +2043,9 @@ def draw_text_layer(c: Canvas, layer: TextLayer, geo: Geometry | None = None) ->
                 _draw_highlight(tile, (lx, y, wl, size_px), st, c.u)
             if line:
                 if sp:
-                    x = lx
-                    for ch_ in line:
+                    for k_, ch_ in enumerate(line):      # kerned advances: pairs like "YT" / "AV" keep their spacing
+                        x = lx + f.getlength(line[:k_]) + sp * k_
                         d.text((x, y), ch_, font=f, fill=(*fill, 255), stroke_width=stroke, stroke_fill=(*fill, 255))
-                        x += f.getlength(ch_) + sp
                 else:
                     d.text((lx, y), line, font=f, fill=(*fill, 255), stroke_width=stroke, stroke_fill=(*fill, 255))
             if extras and st.underline and line:
@@ -2506,6 +2516,18 @@ def export_carousel_zip(carousel: CarouselSpec, fmt: str = "PNG", quality: int =
         for i, im in enumerate(render_carousel(carousel, scale)):
             data, _mime, ext = export_image(im, fmt, quality)
             zf.writestr(f"slide_{i + 1:02d}.{ext}", data)
+    return buf.getvalue()
+
+
+def export_posts_zip(posts: list[CarouselSpec], fmt: str = "PNG", quality: int = 92, scale: float | None = None) -> bytes:
+    """Several separate posts (each a CarouselSpec) in one ZIP: post_01.png ... or carousel_01/slide_01.png ..."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, car in enumerate(posts):
+            imgs = render_carousel(car, scale)
+            for j, im in enumerate(imgs):
+                data, _mime, ext = export_image(im, fmt, quality)
+                zf.writestr(f"post_{i + 1:02d}.{ext}" if len(imgs) == 1 else f"carousel_{i + 1:02d}/slide_{j + 1:02d}.{ext}", data)
     return buf.getvalue()
 
 
@@ -3338,13 +3360,27 @@ def _clone(o):
 
 _CSS = """
 <style>
-.block-container{padding-top:1.1rem;max-width:1650px}
-h1.studio-title{background:linear-gradient(90deg,#ff5f6d,#ffc371 30%,#47c9e5 65%,#8a63ff);
- -webkit-background-clip:text;background-clip:text;color:transparent;font-weight:800;font-size:2.2rem;margin:0 0 .2rem 0}
-.stButton>button,.stDownloadButton>button{border-radius:10px;font-weight:600}
-.stTabs [data-baseweb="tab"]{font-weight:600}
+.block-container{padding-top:1.4rem;padding-bottom:3rem;max-width:1500px}
+h1.studio-title{font-weight:800;font-size:1.9rem;letter-spacing:-.02em;margin:0 0 .6rem 0}
+/* buttons: clear hierarchy, comfortable hit area, visible keyboard focus */
+.stButton>button,.stDownloadButton>button{border-radius:10px;font-weight:600;min-height:2.5rem;
+ transition:transform .08s ease,box-shadow .15s ease}
+.stButton>button:hover,.stDownloadButton>button:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(15,23,42,.12)}
+.stButton>button:focus-visible,.stDownloadButton>button:focus-visible{outline:3px solid rgba(79,70,229,.45);outline-offset:2px}
+.stButton>button[kind="primary"],.stDownloadButton>button[kind="primary"]{background:linear-gradient(135deg,#4f46e5,#7c3aed);border:0}
+/* inputs */
+div[data-baseweb="select"]>div,.stTextInput input,.stTextArea textarea{border-radius:10px}
+label,.stRadio label p{font-weight:500}
+/* tabs & expanders */
+.stTabs [data-baseweb="tab-list"]{gap:.25rem}
+.stTabs [data-baseweb="tab"]{font-weight:600;border-radius:8px 8px 0 0;padding:.4rem .9rem}
+div[data-testid="stExpander"] details{border-radius:12px}
+div[data-testid="stExpander"] summary p{font-weight:600}
+/* bordered containers become calm cards */
+div[data-testid="stVerticalBlockBorderWrapper"]{border-radius:16px}
 .pal-strip{display:flex;border-radius:10px;overflow:hidden;height:26px;margin:2px 0 8px 0;border:1px solid rgba(128,128,128,.3)}
 .pal-strip div{flex:1}
+section[data-testid="stSidebar"] .stButton>button{width:100%}
 </style>
 """
 
@@ -3729,16 +3765,18 @@ def _ui_sidebar(st, car: CarouselSpec) -> None:
     c1.button("↶ Undo", key="undo", on_click=_cb_undo, args=(st,), disabled=not ss["hist"])
     c2.button("↷ Redo", key="redo_btn", on_click=_cb_redo, args=(st,), disabled=not ss["redo"])
     sb.caption(f"{len(ss['hist'])} undo step(s) available")
-    ss["auto_fit"] = sb.checkbox("Auto-fit text when template / format changes", value=ss.get("auto_fit", True))
-    ss["guides"] = sb.checkbox("Show guides (thirds, safe area, story zones)", value=ss.get("guides", False))
-    ss["preview_scale"] = sb.select_slider("Preview quality", options=[0.4, 0.55, 0.7, 0.85, 1.0],
-                                           value=ss.get("preview_scale", 0.55), help="Lower = faster editing")
-    sb.divider()
-    sb.subheader("Carousel")
-    car.indicator = sb.selectbox("Page indicator", ["none", "dots", "bar", "numbers"],
-                                 index=["none", "dots", "bar", "numbers"].index(car.indicator),
-                                 key=f"ind_{ss['gen']}")
-    car.swipe = sb.checkbox("Swipe arrow (all but last slide)", value=car.swipe, key=f"swipe_{ss['gen']}")
+    for k_, v_ in (("auto_fit", True), ("guides", False), ("preview_scale", 0.55)):
+        ss.setdefault(k_, v_)
+    sb.checkbox("Auto-fit text when template / format changes", key="auto_fit")
+    sb.checkbox("Show guides (thirds, safe area, story zones)", key="guides")
+    sb.select_slider("Preview quality", options=[0.4, 0.55, 0.7, 0.85, 1.0], key="preview_scale", help="Lower = faster editing")
+    if len(car.slides) > 1:                      # carousel-only options
+        sb.divider()
+        sb.subheader("Carousel")
+        car.indicator = sb.selectbox("Page indicator", ["none", "dots", "bar", "numbers"],
+                                     index=["none", "dots", "bar", "numbers"].index(car.indicator),
+                                     key=f"ind_{ss['gen']}")
+        car.swipe = sb.checkbox("Swipe arrow (all but last slide)", value=car.swipe, key=f"swipe_{ss['gen']}")
     sb.divider()
     sb.subheader("Project")
     if sb.button("Prepare project file", key="prep_proj"):
@@ -3750,10 +3788,11 @@ def _ui_sidebar(st, car: CarouselSpec) -> None:
     sb.button("Load project", key="load_proj", on_click=_cb_load_project, args=(st, f"open_proj_{ss['gen']}"), disabled=up is None)
 
 
-def _ui_strip(st, car: CarouselSpec) -> None:
+def _ui_strip(st, car: CarouselSpec, title: str | None = "Carousel") -> None:
     ss = st.session_state
     n, per = len(car.slides), 6
-    st.subheader("Carousel")
+    if title:
+        st.subheader(title)
     for start in range(0, n, per):
         cols = st.columns(per)
         for col, i in zip(cols, range(start, min(n, start + per))):
@@ -3776,12 +3815,13 @@ def _ui_toolbar(st, car: CarouselSpec, spec: PostSpec, K) -> None:
     a[4].button("➕", key=K("add"), help="Add slide with the same branding", on_click=_cb_add, args=(st, car))
     a[5].button("🗑", key=K("del"), help="Delete slide", on_click=_cb_del, args=(st, car), disabled=len(car.slides) <= 1)
     b = st.columns([2, 2, 2])
-    new_fmt = _sb(st, "Canvas format", FORMATS.keys(), spec.fmt, K("fmt"), fmt=lambda k: f"{k}  ({FORMATS[k][0]}×{FORMATS[k][1]})")
+    new_fmt = _sb(b[0], "Canvas format", FORMATS.keys(), spec.fmt, K("fmt"), fmt=lambda k: f"{k}  ({FORMATS[k][0]}×{FORMATS[k][1]})")
     if new_fmt != spec.fmt:
         spec.fmt = new_fmt
         if ss.get("auto_fit", True):
             auto_layout(spec)
-    b[2].button("Apply format to all slides", key=K("fmt_all"), on_click=_cb_format_all, args=(st, car, spec))
+    b[2].write("")
+    b[2].button("Apply format to all slides", key=K("fmt_all"), on_click=_cb_format_all, args=(st, car, spec), use_container_width=True)
     spec.duration = b[1].slider("Reel seconds (0 = auto)", 0.0, 15.0, float(_clamp(spec.duration, 0, 15)), 0.5, key=K("dur"))
     with st.expander("➕ Bulk-create slides from text"):
         st.caption("One slide per paragraph (blank line between). First line = headline, remaining lines = body. "
@@ -3795,7 +3835,8 @@ def _ui_design(st, car, spec, K) -> None:
     ss = st.session_state
     st.markdown("**Template**")
     c1, c2 = st.columns([3, 2])
-    spec.category = _sb(st, "Category preset", CATEGORY_PRESETS.keys(), spec.category, K("cat"))
+    spec.category = _sb(c1, "Category preset", CATEGORY_PRESETS.keys(), spec.category, K("cat"))
+    c2.write("")
     c2.write("")
     c2.button("Apply preset", key=K("apply_cat"), on_click=_cb_category, args=(st, spec))
     tpl_keys = list(TEMPLATE_LABELS)
@@ -4195,8 +4236,12 @@ def _ui_preview(st, car, spec, K) -> None:
 
 def _ui_export(st, car, spec, K) -> None:
     ss = st.session_state
-    st.subheader("Export")
-    t_img, t_car, t_reel = st.tabs(["This slide", "Carousel", "Reel"])
+    multi = len(car.slides) > 1
+    if multi:
+        t_img, t_car, t_reel = st.tabs(["🖼 This slide", "🗂 Whole carousel", "🎬 Reel / video"])
+    else:
+        t_img, t_reel = st.tabs(["🖼 Image", "🎬 Animated video"])
+        t_car = None
     with t_img:
         c1, c2, c3 = st.columns(3)
         fmt = c1.selectbox("Format", ["PNG", "JPEG", "WEBP"], key="ex_fmt")
@@ -4207,24 +4252,25 @@ def _ui_export(st, car, spec, K) -> None:
                 im = render(spec, scale=sc, page=(car.active_index, len(car.slides)), indicator=car.indicator, swipe=car.swipe)
                 data, mime, ext = export_image(im, fmt, q)
             _store(st, "img", data, f"slide_{car.active_index + 1}.{ext}", mime, car)
-        _offer(st, "img", "Download slide", car)
-    with t_car:
-        c1, c2, c3 = st.columns(3)
-        cfmt = c1.selectbox("Image format", ["PNG", "JPEG", "WEBP"], key="cx_fmt")
-        cq = c2.slider("Quality", 60, 100, 92, key="cx_q", disabled=cfmt == "PNG")
-        csc = c3.select_slider("Size", options=[0.5, 1.0, 1.5, 2.0], value=1.0, key="cx_sc", format_func=lambda v: f"{v}×")
-        b1, b2 = st.columns(2)
-        if b1.button("Build ZIP", key="b_zip"):
-            with st.spinner("Rendering slides..."):
-                _store(st, "zip", export_carousel_zip(car, cfmt, cq, csc), "carousel.zip", "application/zip", car)
-        if b2.button("Build PDF", key="b_pdf"):
-            with st.spinner("Rendering slides..."):
-                _store(st, "pdf", export_carousel_pdf(car, csc), "carousel.pdf", "application/pdf", car)
-        _offer(st, "zip", "Download carousel (ZIP)", car)
-        _offer(st, "pdf", "Download carousel (PDF)", car)
+        _offer(st, "img", "Download image", car)
+    if t_car is not None:
+        with t_car:
+            c1, c2, c3 = st.columns(3)
+            cfmt = c1.selectbox("Image format", ["PNG", "JPEG", "WEBP"], key="cx_fmt")
+            cq = c2.slider("Quality", 60, 100, 92, key="cx_q", disabled=cfmt == "PNG")
+            csc = c3.select_slider("Size", options=[0.5, 1.0, 1.5, 2.0], value=1.0, key="cx_sc", format_func=lambda v: f"{v}×")
+            b1, b2 = st.columns(2)
+            if b1.button("Build ZIP", key="b_zip"):
+                with st.spinner("Rendering slides..."):
+                    _store(st, "zip", export_carousel_zip(car, cfmt, cq, csc), "carousel.zip", "application/zip", car)
+            if b2.button("Build PDF", key="b_pdf"):
+                with st.spinner("Rendering slides..."):
+                    _store(st, "pdf", export_carousel_pdf(car, csc), "carousel.pdf", "application/pdf", car)
+            _offer(st, "zip", "Download carousel (ZIP)", car)
+            _offer(st, "pdf", "Download carousel (PDF)", car)
     with t_reel:
         r1, r2 = st.columns([2, 1])
-        dur = r1.slider("Total length (seconds)", 5, 60, 18, key="rl_dur", help="Slides with their own 'Reel seconds' keep that length.")
+        dur = r1.slider("Total length (seconds)", 3, 60, 18 if multi else 6, key="rl_dur", help="Slides with their own 'Reel seconds' keep that length.")
         fps = r2.select_slider("FPS", options=[12, 15, 24, 30], value=15, key="rl_fps")
         a1, a2 = st.columns(2)
         trans = a1.selectbox("Transition", TRANSITIONS, key="rl_tr", help="Auto = each slide picks its own transition and motion from its design.")

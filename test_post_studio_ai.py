@@ -1,9 +1,15 @@
+import base64
+import io
+import json
+
 import post_studio as ps
+from PIL import Image
 from streamlit.testing.v1 import AppTest
 from post_studio_ai import (
     Guidelines,
     _app_copy_payload,
     _sync_fca_generated_content,
+    ai_image,
     slide_copy,
 )
 
@@ -70,3 +76,24 @@ def test_long_app_post_is_not_truncated_when_loaded(monkeypatch):
 
     designed_copy = slide_copy(session_state["carousel"].slides[0])
     assert designed_copy["body"] == body
+
+
+def test_openai_image_uses_configured_api_key(monkeypatch):
+    import post_studio_ai as studio
+
+    headers = {}
+    image = Image.new("RGB", (4, 4))
+    data = io.BytesIO()
+    image.save(data, format="PNG")
+    response = json.dumps({"data": [{"b64_json": base64.b64encode(data.getvalue()).decode()}]}).encode()
+
+    def fake_http(_url, _payload, request_headers, _timeout):
+        headers.update(request_headers)
+        return response
+
+    monkeypatch.setattr(studio, "_http", fake_http)
+    guide = Guidelines(image_provider="OpenAI images (API key)", image_key="test-key")
+
+    ai_image("A calm landscape", "Instagram Square", guide, seed=1)
+
+    assert headers["authorization"] == "Bearer test-key"
