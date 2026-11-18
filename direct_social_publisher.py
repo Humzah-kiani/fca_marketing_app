@@ -482,15 +482,31 @@ def list_jobs(limit: int = 200, owner: str | None = None) -> list[dict[str, Any]
         return [dict(r) for r in cur]
 
 
-def cancel_job(job_id: int) -> None:
+def cancel_job(job_id: int, owner: str | None = None) -> None:
     with _DB_LOCK, _conn() as c:
-        c.execute("UPDATE jobs SET status='cancelled' WHERE id=? AND status='pending'", (job_id,))
+        if owner is None:
+            c.execute("UPDATE jobs SET status='cancelled' WHERE id=? AND status='pending'", (job_id,))
+        else:
+            c.execute(
+                "UPDATE jobs SET status='cancelled' WHERE id=? AND status='pending' AND owner=?",
+                (job_id, str(owner)),
+            )
 
 
-def retry_job(job_id: int) -> None:
+def retry_job(job_id: int, owner: str | None = None) -> None:
     with _DB_LOCK, _conn() as c:
-        c.execute("UPDATE jobs SET status='pending', scheduled_at=?, attempts=0, error=NULL "
-                  "WHERE id=? AND status IN ('failed','cancelled')", (iso(utcnow()), job_id))
+        if owner is None:
+            c.execute(
+                "UPDATE jobs SET status='pending', scheduled_at=?, attempts=0, error=NULL "
+                "WHERE id=? AND status IN ('failed','cancelled')",
+                (iso(utcnow()), job_id),
+            )
+        else:
+            c.execute(
+                "UPDATE jobs SET status='pending', scheduled_at=?, attempts=0, error=NULL "
+                "WHERE id=? AND status IN ('failed','cancelled') AND owner=?",
+                (iso(utcnow()), job_id, str(owner)),
+            )
     _WAKE.set()
 
 
@@ -607,9 +623,9 @@ def _queue_view(kp: str, owner: str | None, tz_name: str) -> None:
     m1, m2, m3 = st.columns([2, 1, 1])
     sel = m1.selectbox("Job", [j["id"] for j in jobs], key=f"{kp}_sel")
     m2.button("Cancel pending", key=f"{kp}_cancel", use_container_width=True,
-              on_click=cancel_job, args=(int(sel),))
+              on_click=cancel_job, args=(int(sel), owner))
     m3.button("Retry / requeue", key=f"{kp}_retry", use_container_width=True,
-              on_click=retry_job, args=(int(sel),))
+              on_click=retry_job, args=(int(sel), owner))
     job = next(j for j in jobs if j["id"] == sel)
     with st.expander("Timestamped log & API result"):
         st.code(job["log"] or "(no events yet)")

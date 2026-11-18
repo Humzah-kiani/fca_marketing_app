@@ -374,6 +374,10 @@ Create a `.env` file or configure Streamlit Cloud Secrets:
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Endpoint URL for local Ollama instance |
 | `OLLAMA_MODEL` | `qwen2.5:3b-instruct` | Installed Ollama model identifier |
 | `FCA_CHECK_INTERVAL_HOURS` | `24` | Informational check interval for cron scripts |
+| `AUTH_SMTP_HOST` | *None* | SMTP server used to deliver password-reset tokens |
+| `AUTH_SMTP_PORT` | `587` | SMTP port (`465` uses SSL; other ports use STARTTLS) |
+| `AUTH_SMTP_USERNAME` / `AUTH_SMTP_PASSWORD` | *None* | Optional SMTP credentials |
+| `AUTH_SMTP_FROM` | *None* | Sender address for password-reset email |
 
 ---
 
@@ -396,6 +400,12 @@ cp .env.example .env
 # 4. Launch Streamlit Application
 streamlit run app.py
 ```
+
+The app creates the authentication tables in the configured PostgreSQL database on
+startup. Users can create accounts from the sign-in screen; passwords are stored as
+salted scrypt hashes, and each account's generated posts and publishing queue are
+scoped to its adviser record. Configure the SMTP settings above to enable password
+resets.
 
 ---
 
@@ -422,6 +432,8 @@ fca_marketing_app/
 ├── post_studio.py           # Pillow graphic canvas engine & layout manager
 ├── post_studio_ai.py        # Design studio UI wired to FCA-app generated content
 ├── db.py                    # PostgreSQL connection pool & query helpers
+├── auth_db.py               # PostgreSQL-backed accounts and password security
+├── login_app.py             # Sign-in, signup, session, and password-reset UI
 ├── config.py                # Environment variable reader & settings fallback
 ├── monitor_cli.py           # CLI entrypoint for background scheduled checks
 ├── schema.sql               # PostgreSQL database schema DDL

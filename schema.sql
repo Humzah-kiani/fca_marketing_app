@@ -8,6 +8,23 @@ CREATE TABLE IF NOT EXISTS advisors (
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
+-- Sign-in accounts are linked to an adviser so generated batches are attributable.
+CREATE TABLE IF NOT EXISTS auth_users (
+    id                  SERIAL PRIMARY KEY,
+    username            TEXT UNIQUE NOT NULL,
+    email               TEXT UNIQUE NOT NULL,
+    full_name           TEXT NOT NULL,
+    fca_number          TEXT,
+    password_hash       TEXT NOT NULL,
+    advisor_id          INTEGER NOT NULL REFERENCES advisors(id) ON DELETE RESTRICT,
+    failed_attempts     INTEGER NOT NULL DEFAULT 0,
+    locked_until        TIMESTAMPTZ,
+    totp_secret         TEXT,
+    reset_token_hash    TEXT,
+    reset_expires_at    TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- One row per FCA Handbook / guidance page we track.
 CREATE TABLE IF NOT EXISTS fca_sections (
     id            SERIAL PRIMARY KEY,

@@ -31,6 +31,13 @@ DATABASE_URL = _setting(
     "DATABASE_URL"
 )
 
+# --- Password reset email ------------------------------------------------
+AUTH_SMTP_HOST = _setting("AUTH_SMTP_HOST")
+AUTH_SMTP_PORT = int(_setting("AUTH_SMTP_PORT", "587"))
+AUTH_SMTP_USERNAME = _setting("AUTH_SMTP_USERNAME")
+AUTH_SMTP_PASSWORD = _setting("AUTH_SMTP_PASSWORD")
+AUTH_SMTP_FROM = _setting("AUTH_SMTP_FROM")
+
 # --- AI provider selection --------------------------------------------------
 # Best practical free option for restricted networks is local Ollama.
 AI_PROVIDER = _setting("AI_PROVIDER", "gemini").lower()

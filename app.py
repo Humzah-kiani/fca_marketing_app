@@ -8,6 +8,7 @@ from PIL import Image
 from post_studio_ai import post_studio_ai_ui
 from direct_social_publisher import render_direct_social_publisher
 from post_tracker import render_post_tracker
+from login_app import require_login
 
 from config import AI_PROVIDER, GEMINI_MODEL, OLLAMA_MODEL
 from db import init_db, fetch_all, execute
@@ -31,6 +32,8 @@ st.set_page_config(
     page_icon="🛡️",
     layout="wide",
 )
+
+require_login()
 
 active_model = OLLAMA_MODEL if AI_PROVIDER == "ollama" else GEMINI_MODEL
 
@@ -409,7 +412,7 @@ with tab_generate:
                             fca_sections_snapshot, used_clauses)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
                     (
-                        None,
+                        st.session_state.auth_user_row.get("advisor_id"),
                         format_type,
                         category,
                         guideline,
@@ -453,11 +456,16 @@ with tab_design:
 
 # -------------------------------------------------------------- Post Tracker
 with tab_tracker:
-    render_post_tracker(st)
+    render_post_tracker(
+        st,
+        advisor_id=st.session_state.auth_user_row["advisor_id"],
+    )
 
 # -------------------------------------------------------------- Publish
 with tab_publish:
-    render_direct_social_publisher()
+    render_direct_social_publisher(
+        owner=str(st.session_state.auth_user_row["advisor_id"])
+    )
 
 # ----------------------------------------------------------------- History
 with tab_history:
@@ -468,7 +476,9 @@ with tab_history:
                   gp.id AS post_id, gp.post_index, gp.post_text, gp.status
            FROM generation_batches gb
            JOIN generated_posts gp ON gp.batch_id = gb.id
-           ORDER BY gb.created_at DESC, gp.post_index ASC"""
+           WHERE gb.advisor_id = %s
+           ORDER BY gb.created_at DESC, gp.post_index ASC""",
+        (st.session_state.auth_user_row["advisor_id"],),
     )
     if not rows:
         st.info("No posts generated yet.")
@@ -574,7 +584,9 @@ with tab_flagged:
            JOIN fca_change_log fcl ON fcl.id = pf.change_log_id
            JOIN fca_sections fs ON fs.id = fcl.section_id
            WHERE pf.resolved = FALSE
-           ORDER BY pf.flagged_at DESC"""
+             AND gb.advisor_id = %s
+           ORDER BY pf.flagged_at DESC""",
+        (st.session_state.auth_user_row["advisor_id"],),
     )
     if not flagged:
         st.info("No flagged posts right now.")
@@ -590,11 +602,20 @@ with tab_flagged:
             st.write(f["post_text"])
             if st.button(f"Mark resolved #{f['post_id']}", key=f"resolve_{f['post_id']}"):
                 execute(
-                    "UPDATE post_flags SET resolved = TRUE WHERE post_id = %s",
-                    (f["post_id"],),
+                    """UPDATE post_flags pf
+                       SET resolved = TRUE
+                       FROM generated_posts gp
+                       JOIN generation_batches gb ON gb.id = gp.batch_id
+                       WHERE pf.post_id = gp.id AND gp.id = %s
+                         AND gb.advisor_id = %s""",
+                    (f["post_id"], st.session_state.auth_user_row["advisor_id"]),
                 )
                 execute(
-                    "UPDATE generated_posts SET status = 'active' WHERE id = %s",
-                    (f["post_id"],),
+                    """UPDATE generated_posts gp
+                       SET status = 'active'
+                       FROM generation_batches gb
+                       WHERE gp.batch_id = gb.id AND gp.id = %s
+                         AND gb.advisor_id = %s""",
+                    (f["post_id"], st.session_state.auth_user_row["advisor_id"]),
                 )
                 st.rerun()

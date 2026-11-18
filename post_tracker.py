@@ -35,7 +35,7 @@ def _open_in_design(st, record: dict) -> None:
     st.session_state["tracker_open_post_id"] = record["post_id"]
 
 
-def render_post_tracker(st) -> None:
+def render_post_tracker(st, advisor_id: int) -> None:
     """Render the saved-content tracker and load selected content into Post Studio."""
     st.subheader("Post tracker")
     if st.session_state.pop("tracker_open_notice", False):
@@ -48,12 +48,14 @@ def render_post_tracker(st) -> None:
         "Edits are saved to the original record and should be reviewed by compliance."
     )
     records = fetch_all(
-        """SELECT gp.id AS post_id, gb.id AS batch_id, gb.created_at,
+        """SELECT gp.id AS post_id, gb.id AS batch_id, gb.advisor_id, gb.created_at,
                   gb.format_type, gb.category, gb.carousel_slide_count,
                   gp.post_index, gp.post_text, gp.status
            FROM generation_batches gb
            JOIN generated_posts gp ON gp.batch_id = gb.id
-           ORDER BY gb.created_at DESC, gb.id DESC, gp.post_index ASC"""
+           WHERE gb.advisor_id = %s
+           ORDER BY gb.created_at DESC, gb.id DESC, gp.post_index ASC""",
+        (advisor_id,),
     )
     if not records:
         st.info("No generated post records yet.")
@@ -119,7 +121,7 @@ def render_post_tracker(st) -> None:
                     f"Slide {index}: {text.strip()}"
                     for index, text in enumerate(edited_slides, start=1)
                 )
-                _save_record(st, record, edited_text)
+                _save_record(st, record, advisor_id, edited_text)
     else:
         editor_mode = st.radio(
             "Record action",
@@ -140,7 +142,7 @@ def render_post_tracker(st) -> None:
                 )
                 save = st.form_submit_button("Save edits")
             if save:
-                _save_record(st, record, edited_text)
+                _save_record(st, record, advisor_id, edited_text)
 
     if st.button("Open in Design Post", key=f"tracker_open_{selected_id}"):
         _open_in_design(st, record)
@@ -148,7 +150,7 @@ def render_post_tracker(st) -> None:
         st.rerun()
 
 
-def _save_record(st, record: dict, edited_text: str) -> None:
+def _save_record(st, record: dict, advisor_id: int, edited_text: str) -> None:
     edited_text = edited_text.strip()
     if not edited_text:
         st.error("Post text cannot be empty.")
@@ -156,12 +158,18 @@ def _save_record(st, record: dict, edited_text: str) -> None:
     if edited_text == record["post_text"]:
         st.info("No changes to save.")
         return
-    execute(
-        """UPDATE generated_posts
+    saved = execute(
+        """UPDATE generated_posts gp
            SET post_text = %s,
                status = CASE WHEN status = 'active' THEN 'flagged_for_review' ELSE status END
-           WHERE id = %s""",
-        (edited_text, record["post_id"]),
+           FROM generation_batches gb
+           WHERE gp.id = %s AND gp.batch_id = gb.id AND gb.advisor_id = %s
+           RETURNING gp.id""",
+        (edited_text, record["post_id"], advisor_id),
+        returning=True,
     )
+    if not saved:
+        st.error("Could not save this post: it is unavailable or does not belong to your account.")
+        return
     st.success("Edits saved. The record is marked for compliance review.")
     st.rerun()
