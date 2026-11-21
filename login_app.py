@@ -19,50 +19,20 @@ Folder layout expected:
     your_app/
       login_app.py
       auth_db.py
-      assets/
-        logo.png        <- your brand logo (transparent PNG works best)
 """
 
-import os
 import time
-import base64
 import datetime
 import smtplib
 import streamlit as st
 import auth_db
 
 SESSION_IDLE_TIMEOUT_MINUTES = 30
-LOGO_PATH = os.path.join(os.path.dirname(__file__), "logo.png")
 
 
 @st.cache_resource
 def _initialize_auth_db():
     auth_db.init_db()
-
-
-# --------------------------------------------------------------------------
-# Logo
-# --------------------------------------------------------------------------
-
-@st.cache_data(show_spinner=False)
-def _logo_b64(path: str):
-    try:
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
-    except FileNotFoundError:
-        return None
-
-
-def render_logo():
-    b64 = _logo_b64(LOGO_PATH)
-    if b64:
-        st.markdown(
-            f'<img src="data:image/png;base64,{b64}" class="auth-logo-img" alt="FCA Compliant Adviser AI">',
-            unsafe_allow_html=True,
-        )
-    else:
-        # Graceful fallback if assets/logo.png hasn't been copied over yet.
-        st.markdown('<div class="auth-logo-fallback">🛡️ FCA Compliant Adviser AI</div>', unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------
@@ -90,7 +60,7 @@ def inject_css():
         }
 
         html, body, [data-testid="stAppViewContainer"] {
-            background: radial-gradient(circle at 20% 0%, #163A63 0%, var(--navy) 45%, var(--navy-deep) 100%) !important;
+            background: #FFFFFF !important;
         }
         [data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
         [data-testid="stToolbar"] { right: 1rem; }
@@ -102,8 +72,8 @@ def inject_css():
             background: var(--card-bg) !important;
             border-radius: 20px;
             padding: 2.1rem 2.2rem 1.5rem 2.2rem;
-            box-shadow: 0 25px 60px rgba(0,0,0,0.45);
-            border: 1px solid rgba(201,169,74,0.25);
+            box-shadow: 0 12px 32px rgba(11,37,69,0.12);
+            border: 1px solid var(--field-border);
             position: relative;
             overflow: hidden;
             animation: authFadeIn 0.45s ease-out;
@@ -133,21 +103,6 @@ def inject_css():
         }
         .auth-card [data-testid="stCaptionContainer"] { color: var(--muted) !important; font-size: 0.82rem !important; }
 
-        .auth-logo-img {
-            display: block;
-            margin: 0 auto 0.4rem auto;
-            max-width: 190px;
-            width: 60%;
-            height: auto;
-            filter: drop-shadow(0 8px 16px rgba(11,37,69,0.35));
-        }
-        .auth-logo-fallback {
-            text-align: center;
-            font-size: 1.5rem;
-            font-weight: 700;
-            color: var(--navy) !important;
-            margin-bottom: 0.3rem;
-        }
         .auth-tagline {
             text-align: center;
             color: var(--muted) !important;
@@ -502,7 +457,6 @@ def require_login():
     inject_css()
 
     st.markdown('<div class="auth-card">', unsafe_allow_html=True)
-    render_logo()
     st.markdown(
         '<div class="auth-tagline">Secure sign-in for <b>FCA-compliant</b> marketing copy generation</div>',
         unsafe_allow_html=True,
