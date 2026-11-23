@@ -19,11 +19,11 @@ The application is structured into decoupled modules covering UI presentation, A
 flowchart TD
     subgraph UI ["Streamlit Frontend (app.py)"]
         T1["Generate"]
-        T2["History"]
-        T3["Post Tracker"]
-        T4["Compliance Monitor"]
+        T2["Post Tracker"]
+        T3["Design Post (Post Studio)"]
+        T4["History"]
         T5["Flagged Posts"]
-        T6["Design Post (Post Studio)"]
+        T6["Compliance Monitor"]
         T7["Publish"]
     end
 
@@ -88,12 +88,12 @@ The application interface in [app.py](file:///c:/Users/user/OneDrive%20-%20Highe
 
 ---
 
-### Tab 1: Generate (Marketing Copy Generation)
+### Generate (Marketing Copy Generation)
 
 The primary workspace for generating compliance-grounded text assets.
 
 #### Step-by-Step Operating Instructions:
-1. **Format Selection**:
+1. **Format Selection** (radio buttons):
    - `Post`: Complete, standalone social media text featuring a headline hook, body copy, risk disclosures, and call-to-action.
    - `Carousel`: A sequence of slide-ready copy blocks. Choose between 2 and 10 slides; the default is 5.
 2. **Category Selection**:
@@ -122,15 +122,14 @@ The primary workspace for generating compliance-grounded text assets.
 ### Post Tracker
 
 The **Post Tracker** lists each saved generated item with a serial number, batch ID,
-category, format, creation time, and status. Select a record to view its copy or
-edit it. Carousel records show every slide and allow slide-by-slide edits. Use
-**Open in Design Post** to load the selected item into the graphic editor; its
-carousel slides can then be selected from the studio slide strip. Saving edited
-copy marks the record for compliance review.
+category, format, creation time, and status. Use the row's **View** action to open
+that item directly in **Design Post**. Use **Edit** to open its copy editor in the
+tracker. Carousel records show every slide and allow slide-by-slide edits. Saving
+edited copy marks the record for compliance review.
 
 ---
 
-### Tab 2: Design Post (Post Studio Graphic Editor)
+### Design Post (Post Studio Graphic Editor)
 
 Built on the Pillow rendering engine in [post_studio.py](file:///c:/Users/user/OneDrive%20-%20Higher%20Education%20Commission/Desktop/fca_marketing_app/post_studio.py) and the integrated design UI in `post_studio_ai.py`, **Post Studio** is an in-app visual graphics editor powered by Python Pillow and Streamlit controls. It automatically designs the latest post generated and compliance-validated in the Generate tab; copy generation stays on the app's configured Gemini/Ollama and compliance-validation path.
 
@@ -158,7 +157,7 @@ Built on the Pillow rendering engine in [post_studio.py](file:///c:/Users/user/O
 
 ---
 
-### Tab 3: History (Audit Trail & Logging)
+### History (Audit Trail & Logging)
 
 Provides a regulatory audit trail of every past generation batch.
 
@@ -167,11 +166,23 @@ Provides a regulatory audit trail of every past generation batch.
 - Selected Format, Category, and Custom Guidelines.
 - Active Status (`✅ active` or `⚠️ FLAGGED FOR REVIEW`).
 - **FCA Reference Material Used**: Displays section keys, full section names, direct FCA Handbook URLs, and the 12-character SHA-256 hash prefix recorded at the exact moment of generation.
-- Full generated post text.
+- Full generated post text. Carousel slides are displayed separately, one slide per block.
 
 ---
 
-### Tab 4: Compliance Monitor
+### Flagged Posts Management
+
+When an FCA section's text changes, any past posts created against the *old* wording are automatically moved to `flagged_for_review`.
+
+#### Resolution Workflow:
+1. Expand the flagged post card to inspect original text, category, and creation date.
+2. View the **Reason**: Identifies the specific FCA section that changed (e.g., change detected in *COBS 4 — Communicating with clients*).
+3. Notify the financial adviser to review or regenerate the copy.
+4. Click **Mark Resolved #<post_id>** to clear the flag and restore the post status to active.
+
+---
+
+### Compliance Monitor
 
 Tracks underlying regulatory guidance documents and detects changes.
 
@@ -188,18 +199,6 @@ Tracks underlying regulatory guidance documents and detects changes.
 #### Operating Controls:
 - **Run Compliance Check Now**: Instantly re-fetches live web pages and PDFs, calculates current SHA-256 hashes, logs changes, and flags stale posts.
 - **Change Log**: Displays historic change records with timestamps, section names, URLs, and summaries.
-
----
-
-### Tab 5: Flagged Posts Management
-
-When an FCA section's text changes, any past posts created against the *old* wording are automatically moved to `flagged_for_review`.
-
-#### Resolution Workflow:
-1. Expand the flagged post card to inspect original text, category, and creation date.
-2. View the **Reason**: Identifies the specific FCA section that changed (e.g., change detected in *COBS 4 — Communicating with clients*).
-3. Notify the financial adviser to review or regenerate the copy.
-4. Click **Mark Resolved #<post_id>** to clear the flag and restore the post status to active.
 
 ---
 

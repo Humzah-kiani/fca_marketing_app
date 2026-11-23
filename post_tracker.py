@@ -4,20 +4,18 @@ import re
 from db import execute, fetch_all
 
 
-def _carousel_slides(post_text: str) -> list[str]:
+def carousel_slides(post_text: str) -> list[str]:
+    text = (post_text or "").strip()
+    markers = list(re.finditer(r"(?<!\w)Slide\s+\d+\s*:\s*", text, re.IGNORECASE))
+    if not markers:
+        return [text] if text else []
     slides = []
-    current = None
-    for line in (post_text or "").splitlines():
-        match = re.match(r"\s*Slide\s+\d+\s*:\s*(.*)", line, re.IGNORECASE)
-        if match:
-            if current is not None:
-                slides.append(current.strip())
-            current = match.group(1).strip()
-        elif current is not None and line.strip():
-            current = f"{current}\n{line.strip()}".strip()
-    if current is not None:
-        slides.append(current.strip())
-    return slides or ([post_text.strip()] if post_text.strip() else [])
+    for index, marker in enumerate(markers):
+        end = markers[index + 1].start() if index + 1 < len(markers) else None
+        slide = text[marker.end():end].strip()
+        if slide:
+            slides.append(slide)
+    return slides or [text]
 
 
 def _record_label(record: dict) -> str:
@@ -33,16 +31,20 @@ def _open_in_design(st, record: dict) -> None:
     st.session_state["generated_post_format"] = record["format_type"]
     st.session_state["generated_post_category"] = record["category"]
     st.session_state["tracker_open_post_id"] = record["post_id"]
+    st.session_state["app_section"] = "Design Post"
+    st.session_state["design_post_notice"] = True
+
+
+def _edit_in_tracker(st, record: dict) -> None:
+    st.session_state["app_section"] = "Post Tracker"
+    st.session_state["tracker_selected_post_id"] = record["post_id"]
+    mode = "Edit slides" if str(record["format_type"]).lower() == "carousel" else "Edit text"
+    st.session_state[f"tracker_mode_{record['post_id']}"] = mode
 
 
 def render_post_tracker(st, advisor_id: int) -> None:
-    """Render the saved-content tracker and load selected content into Post Studio."""
+    """Render saved content with actions for viewing or editing each record."""
     st.subheader("Post tracker")
-    if st.session_state.pop("tracker_open_notice", False):
-        st.success(
-            "Record loaded into Post Studio. Select the Design Post tab to preview "
-            "and edit the design; carousel slides appear in its slide strip."
-        )
     st.caption(
         "Browse generated records by serial number, batch, category, and creation date. "
         "Edits are saved to the original record and should be reviewed by compliance."
@@ -61,21 +63,34 @@ def render_post_tracker(st, advisor_id: int) -> None:
         st.info("No generated post records yet.")
         return
 
-    st.dataframe(
-        [
-            {
-                "Serial No.": record["post_id"],
-                "Batch ID": record["batch_id"],
-                "Category": record["category"],
-                "Format": record["format_type"],
-                "Created": str(record["created_at"]),
-                "Status": record["status"],
-            }
-            for record in records
-        ],
-        hide_index=True,
-        use_container_width=True,
-    )
+    headers = st.columns([0.8, 0.8, 1.2, 0.8, 1.5, 1.0, 0.7, 0.7])
+    for column, label in zip(
+        headers,
+        ["Serial No.", "Batch ID", "Category", "Format", "Created", "Status", "View", "Edit"],
+    ):
+        column.markdown(f"**{label}**")
+    for record in records:
+        columns = st.columns([0.8, 0.8, 1.2, 0.8, 1.5, 1.0, 0.7, 0.7])
+        columns[0].write(record["post_id"])
+        columns[1].write(record["batch_id"])
+        columns[2].write(record["category"])
+        columns[3].write(record["format_type"])
+        columns[4].write(str(record["created_at"]))
+        columns[5].write(record["status"])
+        columns[6].button(
+            "View",
+            key=f"tracker_view_{record['post_id']}",
+            on_click=_open_in_design,
+            args=(st, record),
+            use_container_width=True,
+        )
+        columns[7].button(
+            "Edit",
+            key=f"tracker_edit_action_{record['post_id']}",
+            on_click=_edit_in_tracker,
+            args=(st, record),
+            use_container_width=True,
+        )
 
     by_id = {record["post_id"]: record for record in records}
     selected_id = st.selectbox(
@@ -92,7 +107,7 @@ def render_post_tracker(st, advisor_id: int) -> None:
     st.caption(f"Created: {record['created_at']} · Status: {record['status']}")
 
     if str(record["format_type"]).lower() == "carousel":
-        slides = _carousel_slides(record["post_text"])
+        slides = carousel_slides(record["post_text"])
         st.markdown("#### Carousel preview")
         for index, slide in enumerate(slides, start=1):
             with st.container(border=True):
@@ -143,11 +158,6 @@ def render_post_tracker(st, advisor_id: int) -> None:
                 save = st.form_submit_button("Save edits")
             if save:
                 _save_record(st, record, advisor_id, edited_text)
-
-    if st.button("Open in Design Post", key=f"tracker_open_{selected_id}"):
-        _open_in_design(st, record)
-        st.session_state["tracker_open_notice"] = True
-        st.rerun()
 
 
 def _save_record(st, record: dict, advisor_id: int, edited_text: str) -> None:

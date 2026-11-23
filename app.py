@@ -7,7 +7,7 @@ from PIL import Image
 
 from post_studio_ai import post_studio_ai_ui
 from direct_social_publisher import render_direct_social_publisher
-from post_tracker import render_post_tracker
+from post_tracker import carousel_slides, render_post_tracker
 from login_app import require_login
 
 from config import AI_PROVIDER, GEMINI_MODEL, OLLAMA_MODEL
@@ -319,14 +319,27 @@ CATEGORIES = [
     "Lifestyle",
 ]
 
-tab_generate, tab_history, tab_tracker, tab_monitor, tab_flagged, tab_design, tab_publish = st.tabs(
-    ["Generate", "History", "Post Tracker", "Compliance Monitor", "Flagged Posts", "Design Post", "Publish"]
+APP_SECTIONS = [
+    "Generate",
+    "Post Tracker",
+    "Design Post",
+    "History",
+    "Flagged Posts",
+    "Compliance Monitor",
+    "Publish",
+]
+active_section = st.radio(
+    "Workspace",
+    APP_SECTIONS,
+    horizontal=True,
+    key="app_section",
+    label_visibility="collapsed",
 )
 
 # ---------------------------------------------------------------- Generate
-with tab_generate:
+if active_section == "Generate":
     st.subheader("Post details")
-    format_type = st.selectbox("Format", ["Post", "Carousel"])
+    format_type = st.radio("Format", ["Post", "Carousel"], horizontal=True)
     category = st.selectbox("Category", CATEGORIES, key="generate_category")
     post_description = ""
     carousel_slide_count = CAROUSEL_SLIDES
@@ -451,24 +464,26 @@ with tab_generate:
                     )
 
 # -------------------------------------------------------------- Design Post
-with tab_design:
+if active_section == "Design Post":
+    if st.session_state.pop("design_post_notice", False):
+        st.success("Selected post loaded into Design Post.")
     post_studio_ai_ui()
 
 # -------------------------------------------------------------- Post Tracker
-with tab_tracker:
+if active_section == "Post Tracker":
     render_post_tracker(
         st,
         advisor_id=st.session_state.auth_user_row["advisor_id"],
     )
 
 # -------------------------------------------------------------- Publish
-with tab_publish:
+if active_section == "Publish":
     render_direct_social_publisher(
         owner=str(st.session_state.auth_user_row["advisor_id"])
     )
 
 # ----------------------------------------------------------------- History
-with tab_history:
+if active_section == "History":
     st.subheader("Generation history")
     rows = fetch_all(
         """SELECT gb.id AS batch_id, gb.created_at, gb.format_type, gb.category, gb.guideline,
@@ -519,10 +534,19 @@ with tab_history:
             else:
                 st.write("FCA reference material used: not recorded")
             st.write("Generated text:")
-            st.write(r["post_text"])
+            if str(r["format_type"]).lower() == "carousel":
+                for slide_number, slide_text in enumerate(
+                    carousel_slides(r["post_text"]),
+                    start=1,
+                ):
+                    with st.container(border=True):
+                        st.markdown(f"**Slide {slide_number}**")
+                        st.write(slide_text)
+            else:
+                st.write(r["post_text"])
 
 # ------------------------------------------------------------ Monitor tab
-with tab_monitor:
+if active_section == "Compliance Monitor":
     st.subheader("FCA Handbook sections tracked")
     sections = fetch_all(
         "SELECT section_key, section_name, url, last_checked, last_changed FROM fca_sections"
@@ -572,7 +596,7 @@ with tab_monitor:
         st.write(f"[{l['detected_at']}] **{l['section_name']}** — {l['summary']} ({l['url']})")
 
 # ------------------------------------------------------------- Flagged tab
-with tab_flagged:
+if active_section == "Flagged Posts":
     st.subheader("Posts flagged for review due to FCA changes")
     flagged = fetch_all(
         """SELECT gp.id AS post_id, gp.post_text, gp.status, gb.category, gb.format_type,
