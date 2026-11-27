@@ -8,7 +8,7 @@ import secrets
 import smtplib
 import struct
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.message import EmailMessage
 
 import psycopg2.extras
@@ -28,6 +28,7 @@ _SCRYPT_P = 1
 _MAX_FAILED_ATTEMPTS = 5
 _LOCKOUT_MINUTES = 15
 _RESET_TOKEN_MINUTES = 30
+ROLES = ("user", "admin")
 
 
 def init_db():
@@ -98,7 +99,8 @@ def _user_by_identifier(identifier):
         return None
     return db.fetch_one(
         """SELECT id, username, email, full_name, fca_number, password_hash,
-                  advisor_id, failed_attempts, locked_until, totp_secret
+                  advisor_id, failed_attempts, locked_until, totp_secret,
+                  role, is_active
            FROM auth_users WHERE username = %s OR email = %s""",
         (key, key),
     )
@@ -128,6 +130,9 @@ def create_user(username, email, password, full_name, fca_number=""):
     try:
         with db.get_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("LOCK TABLE auth_users IN EXCLUSIVE MODE")
+                cur.execute("SELECT COUNT(*) AS user_count FROM auth_users")
+                first_user = cur.fetchone()["user_count"] == 0
                 cur.execute(
                     """INSERT INTO advisors (name, email) VALUES (%s, %s)
                        ON CONFLICT (email) DO NOTHING RETURNING id""",
@@ -139,9 +144,17 @@ def create_user(username, email, password, full_name, fca_number=""):
                 advisor_id = advisor["id"]
                 cur.execute(
                     """INSERT INTO auth_users
-                           (username, email, full_name, fca_number, password_hash, advisor_id)
-                       VALUES (%s, %s, %s, %s, %s, %s)""",
-                    (username, email, full_name, fca_number, password_hash, advisor_id),
+                           (username, email, full_name, fca_number, password_hash, advisor_id, role)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        username,
+                        email,
+                        full_name,
+                        fca_number,
+                        password_hash,
+                        advisor_id,
+                        "admin" if first_user else "user",
+                    ),
                 )
     except db.psycopg2.errors.UniqueViolation:
         return False, "That username or email is already registered."
@@ -150,7 +163,7 @@ def create_user(username, email, password, full_name, fca_number=""):
 
 def authenticate(identifier, password):
     user = _user_by_identifier(identifier)
-    if not user:
+    if not user or not user["is_active"]:
         return {"ok": False, "reason": "Invalid username or password.", "needs_2fa": False}
 
     locked_until = user["locked_until"]
@@ -181,7 +194,10 @@ def authenticate(identifier, password):
     )
     public_user = {
         key: user[key]
-        for key in ("id", "username", "email", "full_name", "fca_number", "advisor_id")
+        for key in (
+            "id", "username", "email", "full_name", "fca_number",
+            "advisor_id", "role",
+        )
     }
     return {
         "ok": True,
@@ -193,12 +209,222 @@ def authenticate(identifier, password):
 
 def get_user(username):
     user = _user_by_identifier(username)
-    if not user:
+    if not user or not user["is_active"]:
         return None
     return {
         key: user[key]
-        for key in ("id", "username", "email", "full_name", "fca_number", "advisor_id")
+        for key in (
+            "id", "username", "email", "full_name", "fca_number",
+            "advisor_id", "role",
+        )
     }
+
+
+def _is_active_admin(cur, identifier):
+    key = _normalise_identifier(identifier)
+    if not key:
+        return None
+    cur.execute(
+        """SELECT id, username FROM auth_users
+           WHERE (username = %s OR email = %s)
+             AND role = 'admin' AND is_active = TRUE""",
+        (key, key),
+    )
+    return cur.fetchone()
+
+
+def _write_audit(cur, actor, action, target):
+    cur.execute(
+        "INSERT INTO auth_audit_log (actor, action, target) VALUES (%s, %s, %s)",
+        (actor, action, target),
+    )
+
+
+def _validate_profile(full_name, email, fca_number):
+    full_name = (full_name or "").strip()
+    email = _normalise_identifier(email)
+    fca_number = (fca_number or "").strip() or None
+    if not full_name or len(full_name) > 120:
+        return None, "Enter a name of at most 120 characters."
+    if len(email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return None, "Enter a valid email address."
+    if len(fca_number or "") > 100:
+        return None, "FCA reference number must be at most 100 characters."
+    return (full_name, email, fca_number), None
+
+
+def list_users(actor, search=""):
+    """Return user-management records for an active administrator."""
+    if not db.fetch_one(
+        """SELECT id FROM auth_users
+           WHERE (username = %s OR email = %s)
+             AND role = 'admin' AND is_active = TRUE""",
+        (_normalise_identifier(actor), _normalise_identifier(actor)),
+    ):
+        return []
+    term = "%" + (search or "").strip() + "%"
+    return db.fetch_all(
+        """SELECT username, email, full_name, fca_number, role, is_active,
+                  locked_until, (totp_secret IS NOT NULL) AS totp_enabled
+           FROM auth_users
+           WHERE username ILIKE %s OR email ILIKE %s OR full_name ILIKE %s
+           ORDER BY username""",
+        (term, term, term),
+    )
+
+
+def update_user(actor, username, *, full_name, email, fca_number, role, is_active):
+    if role not in ROLES:
+        return False, "Select a valid account role."
+    profile, error = _validate_profile(full_name, email, fca_number)
+    if error:
+        return False, error
+    full_name, email, fca_number = profile
+    actor_key = _normalise_identifier(actor)
+    target_key = _normalise_identifier(username)
+
+    try:
+        with db.get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("LOCK TABLE auth_users IN EXCLUSIVE MODE")
+                admin = _is_active_admin(cur, actor_key)
+                if not admin:
+                    return False, "Administrator access is required."
+                cur.execute(
+                    """SELECT id, username, advisor_id, role, is_active
+                       FROM auth_users WHERE username = %s FOR UPDATE""",
+                    (target_key,),
+                )
+                target = cur.fetchone()
+                if not target:
+                    return False, "User not found."
+                removes_active_admin = (
+                    target["role"] == "admin"
+                    and target["is_active"]
+                    and (role != "admin" or not is_active)
+                )
+                if removes_active_admin:
+                    cur.execute(
+                        """SELECT COUNT(*) AS admin_count FROM auth_users
+                           WHERE role = 'admin' AND is_active = TRUE"""
+                    )
+                    if cur.fetchone()["admin_count"] <= 1:
+                        return False, "At least one active administrator must remain."
+                if target_key == _normalise_identifier(admin["username"]) and (
+                    role != "admin" or not is_active
+                ):
+                    return False, "You cannot remove your own administrator access."
+                cur.execute(
+                    "UPDATE advisors SET name = %s, email = %s WHERE id = %s",
+                    (full_name, email, target["advisor_id"]),
+                )
+                cur.execute(
+                    """UPDATE auth_users
+                       SET email = %s, full_name = %s, fca_number = %s,
+                           role = %s, is_active = %s
+                       WHERE id = %s""",
+                    (email, full_name, fca_number, role, is_active, target["id"]),
+                )
+                _write_audit(cur, admin["username"], "user_updated", target["username"])
+    except db.psycopg2.errors.UniqueViolation:
+        return False, "That email address is already in use."
+    return True, "User updated."
+
+
+def unlock_account(actor, username):
+    target_key = _normalise_identifier(username)
+    with db.get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("LOCK TABLE auth_users IN EXCLUSIVE MODE")
+            admin = _is_active_admin(cur, actor)
+            if not admin:
+                return False, "Administrator access is required."
+            cur.execute(
+                """UPDATE auth_users
+                   SET failed_attempts = 0, locked_until = NULL
+                   WHERE username = %s RETURNING username""",
+                (target_key,),
+            )
+            target = cur.fetchone()
+            if not target:
+                return False, "User not found."
+            _write_audit(cur, admin["username"], "account_unlocked", target["username"])
+    return True, "Account unlocked."
+
+
+def admin_set_password(actor, username, new_password):
+    if len(new_password) > 256:
+        return False, "Password must be at most 256 characters."
+    _, unmet = password_strength(new_password)
+    if unmet:
+        return False, "Password needs " + ", ".join(unmet) + "."
+    password_hash = _hash_password(new_password)
+    target_key = _normalise_identifier(username)
+    with db.get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("LOCK TABLE auth_users IN EXCLUSIVE MODE")
+            admin = _is_active_admin(cur, actor)
+            if not admin:
+                return False, "Administrator access is required."
+            cur.execute(
+                """UPDATE auth_users
+                   SET password_hash = %s, reset_token_hash = NULL,
+                       reset_expires_at = NULL, failed_attempts = 0, locked_until = NULL
+                   WHERE username = %s RETURNING username""",
+                (password_hash, target_key),
+            )
+            target = cur.fetchone()
+            if not target:
+                return False, "User not found."
+            _write_audit(cur, admin["username"], "password_reset_by_admin", target["username"])
+    return True, "Password updated."
+
+
+def delete_user(actor, username):
+    actor_key = _normalise_identifier(actor)
+    target_key = _normalise_identifier(username)
+    with db.get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("LOCK TABLE auth_users IN EXCLUSIVE MODE")
+            admin = _is_active_admin(cur, actor_key)
+            if not admin:
+                return False, "Administrator access is required."
+            if target_key == _normalise_identifier(admin["username"]):
+                return False, "You cannot remove your own administrator account."
+            cur.execute(
+                """SELECT id, username, role, is_active FROM auth_users
+                   WHERE username = %s FOR UPDATE""",
+                (target_key,),
+            )
+            target = cur.fetchone()
+            if not target:
+                return False, "User not found."
+            if target["role"] == "admin" and target["is_active"]:
+                cur.execute(
+                    """SELECT COUNT(*) AS admin_count FROM auth_users
+                       WHERE role = 'admin' AND is_active = TRUE"""
+                )
+                if cur.fetchone()["admin_count"] <= 1:
+                    return False, "At least one active administrator must remain."
+            cur.execute("DELETE FROM auth_users WHERE id = %s", (target["id"],))
+            _write_audit(cur, admin["username"], "user_deleted", target["username"])
+    return True, "User removed."
+
+
+def get_audit_log(actor, limit=50):
+    if not db.fetch_one(
+        """SELECT id FROM auth_users
+           WHERE (username = %s OR email = %s)
+             AND role = 'admin' AND is_active = TRUE""",
+        (_normalise_identifier(actor), _normalise_identifier(actor)),
+    ):
+        return []
+    limit = max(1, min(int(limit), 200))
+    return db.fetch_all(
+        """SELECT created_at AS ts, actor, action, target
+           FROM auth_audit_log ORDER BY created_at DESC, id DESC LIMIT %s""",
+        (limit,),
+    )
 
 
 def _totp_code(secret, counter):
@@ -214,7 +440,7 @@ def verify_totp_code(username, code):
         return False
     user = _user_by_identifier(username)
     secret = user and user["totp_secret"]
-    if not secret:
+    if not secret or not user["is_active"]:
         return False
     counter = int(time.time() // 30)
     try:
@@ -228,7 +454,7 @@ def verify_totp_code(username, code):
 
 def request_password_reset(identifier):
     user = _user_by_identifier(identifier)
-    if not user:
+    if not user or not user["is_active"]:
         return None
     token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()

@@ -42,6 +42,27 @@ def init_db():
                 cur.execute(f.read())
 
             cur.execute(
+                """ALTER TABLE auth_users
+                   ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'
+                   CHECK (role IN ('user', 'admin'))"""
+            )
+            cur.execute(
+                """ALTER TABLE auth_users
+                   ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE"""
+            )
+            cur.execute(
+                """UPDATE auth_users
+                   SET role = 'admin'
+                   WHERE id = (
+                       SELECT id FROM auth_users
+                       WHERE is_active = TRUE ORDER BY created_at, id LIMIT 1
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM auth_users
+                       WHERE role = 'admin' AND is_active = TRUE
+                   )"""
+            )
+            cur.execute(
                 "ALTER TABLE generation_batches ADD COLUMN IF NOT EXISTS used_clauses JSONB"
             )
             cur.execute(

@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS auth_users (
     fca_number          TEXT,
     password_hash       TEXT NOT NULL,
     advisor_id          INTEGER NOT NULL REFERENCES advisors(id) ON DELETE RESTRICT,
+    role                TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
+    is_active           BOOLEAN NOT NULL DEFAULT TRUE,
     failed_attempts     INTEGER NOT NULL DEFAULT 0,
     locked_until        TIMESTAMPTZ,
     totp_secret         TEXT,
@@ -24,6 +26,17 @@ CREATE TABLE IF NOT EXISTS auth_users (
     reset_expires_at    TIMESTAMPTZ,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Admin actions are retained independently of the account they affect.
+CREATE TABLE IF NOT EXISTS auth_audit_log (
+    id          SERIAL PRIMARY KEY,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    actor       TEXT,
+    action      TEXT NOT NULL,
+    target      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_audit_log_created_at
+    ON auth_audit_log(created_at DESC);
 
 -- One row per FCA Handbook / guidance page we track.
 CREATE TABLE IF NOT EXISTS fca_sections (

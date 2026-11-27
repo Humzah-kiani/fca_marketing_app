@@ -404,7 +404,11 @@ The app creates the authentication tables in the configured PostgreSQL database 
 startup. Users can create accounts from the sign-in screen; passwords are stored as
 salted scrypt hashes, and each account's generated posts and publishing queue are
 scoped to its adviser record. Configure the SMTP settings above to enable password
-resets.
+resets. The first active account is made an administrator automatically; when upgrading
+an existing database without an active administrator, the oldest active account is
+promoted. Administrators can manage account roles and active status from the sign-in
+sidebar. Account changes are checked against PostgreSQL on each app rerun, and admin
+actions are recorded in the authentication audit log.
 
 ---
 
